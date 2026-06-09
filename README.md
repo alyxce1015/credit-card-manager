@@ -1,145 +1,155 @@
-# Esspresowe
+# Espressowe
 
-A React Native (Expo) app for tracking your credit cards, monitoring available credit, logging purchases, and keeping an eye on upcoming payments and annual fee renewals.
+A personal credit card portfolio manager built with React Native + Expo, deployed as a PWA at [espressowe.alyxcuiedio.com](https://espressowe.alyxcuiedio.com).
+
+---
 
 ## Features
 
-- Add cards from a built-in catalog or create a custom card
-- Track credit limits and available balance after purchases
-- Log purchases by card, amount, merchant, category, and date
-- Upcoming payment and annual fee renewal alerts
-- Benefit chip display showing top earning categories + base rate
-- Icon legend explaining every reward category symbol
-- Responsive layout — optimized for both phone and desktop web
+**Card Management**
+- Add cards from a catalog of 23+ credit cards or create a custom card
+- Track last 4 digits, credit limit, payment due day, and card open date
+- Edit or delete cards at any time
+
+**Plaid Integration**
+- Connect real bank accounts via Plaid Link
+- Automatically syncs current balance, available credit, minimum payment, and next payment due date
+- Cursor-based transaction sync (handles added, modified, and removed transactions)
+- Credit limit auto-populated from Plaid's balance data
+
+**Dashboard (Home Tab)**
+- Total available credit across all cards
+- Total spent vs. total limit
+- Upcoming payments within 15 days with urgency indicators
+- Annual fee renewal countdowns
+- Recent transactions list
+- Payment and fee insight pills
+
+**Cards Tab**
+- Card image, last four digits, balance, and available credit
+- Color-coded indicators: green (healthy) → amber (caution >30% used) → red (high >50% used)
+- Statement end date badge with urgency coloring
+- Minimum payment badge for Plaid-linked cards
+- Mark Paid toggle per card
+- Connect / Sync buttons for Plaid-linked cards
+
+**Benefits Tab**
+- Earn rate multipliers by spending category for every card in your wallet
+- Rotating category tracking
+- Filter by category
+
+**Security**
+- PIN gate on app open (4-digit PIN set via environment variable)
+- Auto-locks after 15 minutes of inactivity
+- `plaid_connections` table protected by Supabase RLS — blocks anon key, edge functions use service role
+- `robots.txt` prevents search engine indexing
 
 ---
 
-## Prerequisites
+## Stack
 
-- [Node.js](https://nodejs.org/) (v18 or newer)
-- [npm](https://www.npmjs.com/) or [yarn](https://yarnpkg.com/)
-- [Expo CLI](https://docs.expo.dev/get-started/installation/) — install globally:
-  ```bash
-  npm install -g expo-cli
-  ```
-- **Expo Go** app on your phone (iOS or Android) — for testing on a real device
-- A [Supabase](https://supabase.com/) project (free tier works)
-
----
-
-## Supabase Setup
-
-### 1. Create a Supabase project
-
-Go to [supabase.com](https://supabase.com/), create a new project, and note your **Project URL** and **Anon Key** from Settings → API.
-
-### 2. Create the database tables
-
-Run the following in your Supabase **SQL Editor**:
-
-```sql
--- Cards table
-create table cards (
-  id text primary key,
-  catalog_id text not null,
-  name text not null,
-  last_four text,
-  due_day integer not null,
-  card_limit text,
-  image_url text,
-  color text,
-  member_since text,
-  fee_due_date text,
-  created_at timestamptz default now()
-);
-
-alter table cards disable row level security;
-
--- Purchases table
-create table purchases (
-  id text primary key,
-  card_id text not null,
-  amount numeric(10,2) not null,
-  merchant text not null,
-  category text not null,
-  date date not null,
-  created_at timestamptz default now()
-);
-
-alter table purchases disable row level security;
-```
-
----
-
-## Local Setup
-
-### 1. Clone the repo
-
-```bash
-git clone https://github.com/alyxce1015/credit-card-manager.git
-cd credit-card-manager
-```
-
-### 2. Install dependencies
-
-```bash
-npm install
-```
-
-### 3. Configure environment variables
-
-Create a `.env` file in the project root:
-
-```
-EXPO_PUBLIC_SUPABASE_URL=https://your-project-id.supabase.co
-EXPO_PUBLIC_SUPABASE_ANON_KEY=your-anon-key-here
-```
-
-Replace the values with your Supabase project URL and anon key.
-
-### 4. Start the app
-
-```bash
-npm start
-```
-
-This opens the Expo dev tools. From there:
-
-| Platform | How to run |
-|----------|-----------|
-| **Phone** | Scan the QR code with Expo Go |
-| **iOS Simulator** | Press `i` in the terminal |
-| **Android Emulator** | Press `a` in the terminal |
-| **Web browser** | Press `w` in the terminal |
+| Layer | Technology |
+|---|---|
+| Framework | React Native 0.81.5 + Expo ~54 (managed, New Architecture) |
+| Language | TypeScript |
+| Database | Supabase (PostgreSQL, RLS off for cards/purchases, on for plaid_connections) |
+| Plaid | Production environment — transactions + liabilities products |
+| Edge Functions | Supabase Edge Functions (Deno runtime) |
+| Deployment | Vercel — auto-deploy on push to main |
+| Distribution | PWA — add to iPhone home screen via Safari |
 
 ---
 
 ## Project Structure
 
 ```
-credit-card-manager/
-├── App.tsx              # Main app — all screens and navigation
-├── data/
-│   └── cards.ts         # Card catalog (21 cards + custom)
-├── db/
-│   └── database.ts      # Supabase queries for cards and purchases
-├── lib/
-│   └── supabase.ts      # Supabase client setup
+├── App.tsx                      # Main component — all UI and state
+├── db/database.ts               # Supabase queries + Plaid edge function callers
+├── lib/supabase.ts              # Supabase client
+├── data/cards.ts                # Static card catalog (23 cards + custom) and benefit definitions
 ├── styles/
-│   ├── card.ts          # Card tile styles
-│   ├── dashboard.ts     # Home screen + tab bar styles
-│   ├── layout.ts        # Shared layout styles
-│   └── modal.ts         # Modal and form styles
-└── assets/
-    └── CC_images/       # Card artwork
+│   ├── card.ts                  # Card component styles
+│   ├── dashboard.ts             # Home tab styles
+│   ├── layout.ts                # Shared layout styles
+│   └── modal.ts                 # Modal styles
+├── supabase/functions/
+│   ├── plaid-link-token/        # Creates Plaid link_token for client
+│   ├── plaid-exchange-token/    # Exchanges public_token → access_token, stores in DB
+│   ├── plaid-sync-liabilities/  # Fetches balance + credit card liabilities, updates card row
+│   └── plaid-sync-transactions/ # Cursor-based transaction sync, upserts into purchases
+├── web/
+│   ├── index.html               # PWA HTML template with iOS meta tags
+│   └── robots.txt               # Disallow all crawlers (copied to dist/ by post-build script)
+├── assets/                      # Card images, app icon, splash screen
+├── copy-pwa-assets.js           # Post-build: copies apple-touch-icon + robots.txt into dist/
+└── vercel.json                  # Vercel build configuration
 ```
 
 ---
 
-## Tech Stack
+## Database
 
-- [Expo](https://expo.dev/) 54 (React Native)
-- [React](https://react.dev/) 19
-- [Supabase](https://supabase.com/) (PostgreSQL backend)
-- [AsyncStorage](https://react-native-async-storage.github.io/async-storage/) (session persistence)
-- [@expo/vector-icons](https://docs.expo.dev/guides/icons/) — FontAwesome 6
+| Table | Purpose |
+|---|---|
+| `cards` | User's card portfolio including Plaid-synced fields |
+| `purchases` | Manual and Plaid-synced transactions |
+| `plaid_connections` | Plaid access tokens — never exposed to client (RLS enabled) |
+
+Plaid columns on `cards`:
+`plaid_account_id`, `plaid_item_id`, `current_balance`, `available_credit`, `last_statement_balance`, `minimum_payment`, `next_payment_due`, `last_synced_at`
+
+---
+
+## Environment Variables
+
+**Local — `.env`**
+```
+EXPO_PUBLIC_APP_PIN=            # 4-digit PIN for the lock screen
+EXPO_PUBLIC_SUPABASE_URL=       # Supabase project URL
+EXPO_PUBLIC_SUPABASE_ANON_KEY=  # Supabase anon key
+```
+
+**Supabase Edge Function Secrets**
+```
+PLAID_CLIENT_ID
+PLAID_SECRET
+PLAID_ENV=production
+```
+`SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are injected automatically by Supabase.
+
+**Vercel** — add `EXPO_PUBLIC_APP_PIN`, `EXPO_PUBLIC_SUPABASE_URL`, and `EXPO_PUBLIC_SUPABASE_ANON_KEY` in project settings.
+
+---
+
+## Local Development
+
+```bash
+npm install
+npm run web        # Start dev server in browser at localhost
+```
+
+---
+
+## Deployment
+
+Vercel auto-deploys on every push to `main`. The build runs:
+```bash
+npx expo export -p web && node copy-pwa-assets.js
+```
+This exports the web bundle to `dist/` then copies the PWA icon and `robots.txt` into the output.
+
+**Deploy edge functions manually:**
+```bash
+npx supabase functions deploy plaid-link-token
+npx supabase functions deploy plaid-exchange-token
+npx supabase functions deploy plaid-sync-liabilities
+npx supabase functions deploy plaid-sync-transactions
+```
+
+---
+
+## Installing as PWA on iPhone
+
+1. Open [espressowe.alyxcuiedio.com](https://espressowe.alyxcuiedio.com) in **Safari**
+2. Tap the Share button → **Add to Home Screen**
+3. Enter your PIN — the app locks after 15 minutes of inactivity
