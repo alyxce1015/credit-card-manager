@@ -21,6 +21,15 @@ export type UserCard = {
   memberSince?: string;  // "YYYY-MM-01" — card opened month, shown on no-fee cards
   feeDueDate?: string;   // "YYYY-MM-DD" — exact annual fee due date, for fee cards
   paidDate?: string;     // "YYYY-MM-DD" of the due date this card was marked paid for
+  // Plaid fields — written by edge functions, never by the client
+  plaidAccountId?: string;
+  plaidItemId?: string;
+  currentBalance?: number;
+  availableCredit?: number;
+  lastStatementBalance?: number;
+  minimumPayment?: number;
+  nextPaymentDue?: string; // "YYYY-MM-DD"
+  lastSyncedAt?: string;   // ISO timestamp
 };
 
 function toRow(card: UserCard) {
@@ -51,6 +60,14 @@ function fromRow(row: Record<string, unknown>): UserCard {
     memberSince: (row.member_since as string | null | undefined) ?? undefined,
     feeDueDate: (row.fee_due_date as string | null | undefined) ?? undefined,
     paidDate: (row.paid_date as string | null | undefined) ?? undefined,
+    plaidAccountId: (row.plaid_account_id as string | null | undefined) ?? undefined,
+    plaidItemId: (row.plaid_item_id as string | null | undefined) ?? undefined,
+    currentBalance: row.current_balance != null ? Number(row.current_balance) : undefined,
+    availableCredit: row.available_credit != null ? Number(row.available_credit) : undefined,
+    lastStatementBalance: row.last_statement_balance != null ? Number(row.last_statement_balance) : undefined,
+    minimumPayment: row.minimum_payment != null ? Number(row.minimum_payment) : undefined,
+    nextPaymentDue: (row.next_payment_due as string | null | undefined) ?? undefined,
+    lastSyncedAt: (row.last_synced_at as string | null | undefined) ?? undefined,
   };
 }
 
@@ -170,4 +187,56 @@ export async function clearAllData(): Promise<void> {
     .delete()
     .not('id', 'is', null);
   if (cardsError) throw new Error(cardsError.message);
+}
+
+// ─── Plaid Edge Functions ─────────────────────────────────────────────────────
+
+const SUPABASE_URL = process.env.EXPO_PUBLIC_SUPABASE_URL!;
+const SUPABASE_ANON_KEY = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY!;
+
+async function callEdge(name: string, body: Record<string, unknown> = {}): Promise<unknown> {
+  const res = await fetch(`${SUPABASE_URL}/functions/v1/${name}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+      'apikey': SUPABASE_ANON_KEY,
+    },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json();
+  if (!res.ok) {
+    const msg = typeof data?.error === 'string' ? data.error : data?.error?.message ?? 'Edge function error';
+    throw new Error(msg);
+  }
+  return data;
+}
+
+export async function plaidGetLinkToken(): Promise<string> {
+  const data = await callEdge('plaid-link-token') as { link_token: string };
+  return data.link_token;
+}
+
+export async function plaidExchangeToken(opts: {
+  publicToken: string;
+  institutionName: string;
+  institutionId: string;
+  accountId?: string;
+  cardId?: string;
+}): Promise<void> {
+  await callEdge('plaid-exchange-token', {
+    public_token: opts.publicToken,
+    institution_name: opts.institutionName,
+    institution_id: opts.institutionId,
+    ...(opts.accountId && { account_id: opts.accountId }),
+    ...(opts.cardId && { card_id: opts.cardId }),
+  });
+}
+
+export async function plaidSyncLiabilities(cardId: string): Promise<void> {
+  await callEdge('plaid-sync-liabilities', { card_id: cardId });
+}
+
+export async function plaidSyncTransactions(cardId: string): Promise<void> {
+  await callEdge('plaid-sync-transactions', { card_id: cardId });
 }

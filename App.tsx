@@ -12,7 +12,19 @@ import { modalStyles } from './styles/modal';
 import { dashStyles as ds } from './styles/dashboard';
 import { FontAwesome6 } from '@expo/vector-icons';
 import { CARD_CATALOG, ISSUERS, type CatalogCard, type Benefit } from './data/cards';
-import { getCards, insertCard, deleteCard, deleteCards, updateCard, setCardPaidDate, getPurchases, insertPurchase, clearAllData, type UserCard, type Purchase } from './db/database';
+import { getCards, insertCard, deleteCard, deleteCards, updateCard, setCardPaidDate, getPurchases, insertPurchase, clearAllData, plaidGetLinkToken, plaidExchangeToken, plaidSyncLiabilities, plaidSyncTransactions, type UserCard, type Purchase } from './db/database';
+
+// ─── Plaid SDK (native only) ──────────────────────────────────────────────────
+
+let _plaidCreate: ((config: { token: string }) => void) | null = null;
+let _plaidOpen: ((props: { onSuccess: (s: any) => void; onExit: (e: any) => void }) => void) | null = null;
+if (Platform.OS !== 'web') {
+  try {
+    const sdk = require('react-native-plaid-link-sdk');
+    _plaidCreate = sdk.create;
+    _plaidOpen = sdk.open;
+  } catch {}
+}
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -185,7 +197,18 @@ function currentDueDate(dueDay: number): string {
 }
 
 function isCardPaid(card: UserCard): boolean {
-  return !!card.paidDate && card.paidDate === currentDueDate(card.dueDay);
+  if (!card.paidDate) return false;
+  const dueDate = card.nextPaymentDue ?? (card.dueDay ? currentDueDate(card.dueDay) : null);
+  return !!dueDate && card.paidDate === dueDate;
+}
+
+function formatSyncedTime(iso: string): string {
+  const mins = Math.floor((Date.now() - new Date(iso).getTime()) / 60000);
+  if (mins < 1) return 'just now';
+  if (mins < 60) return `${mins}m ago`;
+  const hrs = Math.floor(mins / 60);
+  if (hrs < 24) return `${hrs}h ago`;
+  return `${Math.floor(hrs / 24)}d ago`;
 }
 
 function abbreviateCardName(name: string): string {
@@ -422,6 +445,9 @@ export default function App() {
   const [calendarVisible, setCalendarVisible] = useState(false);
   const [benefitCategoryFilter, setBenefitCategoryFilter] = useState('All');
   const [benefitFilterOpen, setBenefitFilterOpen] = useState(false);
+  const [connectingCardId, setConnectingCardId] = useState<string | null>(null);
+  const [syncingCardId, setSyncingCardId] = useState<string | null>(null);
+  const [connectingBank, setConnectingBank] = useState(false);
 
   const stepAnim = useRef(new Animated.Value(1)).current;
 
@@ -514,12 +540,6 @@ export default function App() {
     setSaveError('');
     if (!selectedCard) { setSaveError('No card selected.'); return; }
 
-    const dueDay = parseInt(form.dueDay, 10);
-    if (isNaN(dueDay) || dueDay < 1 || dueDay > 31) {
-      setSaveError('Enter a due day between 1 and 31.');
-      return;
-    }
-
     const name = selectedCard.id === 'custom' ? form.customName.trim() : selectedCard.name;
     if (!name) { setSaveError('Card name is required.'); return; }
 
@@ -548,8 +568,8 @@ export default function App() {
         catalogId: selectedCard.id,
         name,
         lastFour: form.lastFour.trim(),
-        dueDay,
-        limit: form.limit.trim(),
+        dueDay: 1,
+        limit: '',
         imageUrl: '',
         color: selectedCard.color,
         memberSince,
@@ -569,26 +589,43 @@ export default function App() {
   });
 
   // Dashboard computations
-  const totalLimitValue = cards.reduce((sum, c) => {
-    const n = parseInt(c.limit.replace(/[^0-9]/g, ''), 10);
-    return sum + (isNaN(n) ? 0 : n);
-  }, 0);
-
   const spentByCard = purchases.reduce<Record<string, number>>((acc, p) => {
     acc[p.cardId] = (acc[p.cardId] ?? 0) + p.amount;
     return acc;
   }, {});
-  const totalSpent = Object.values(spentByCard).reduce((sum, n) => sum + n, 0);
-  const totalAvailable = totalLimitValue - totalSpent;
+  const totalSpent = cards.reduce((sum, c) => {
+    if (c.currentBalance !== undefined) return sum + c.currentBalance;
+    return sum + (spentByCard[c.id] ?? 0);
+  }, 0);
+
+  const totalLimitValue = cards.reduce((sum, c) => {
+    const manualLimit = parseInt((c.limit ?? '').replace(/[^0-9]/g, ''), 10);
+    if (!isNaN(manualLimit) && manualLimit > 0) return sum + manualLimit;
+    if (c.availableCredit !== undefined || c.currentBalance !== undefined) {
+      return sum + (c.availableCredit ?? 0) + (c.currentBalance ?? 0);
+    }
+    return sum;
+  }, 0);
+  const totalAvailable = cards.reduce((sum, c) => {
+    if (c.availableCredit !== undefined) return sum + c.availableCredit;
+    const n = parseInt((c.limit ?? '').replace(/[^0-9]/g, ''), 10);
+    return sum + (isNaN(n) ? 0 : Math.max(0, n - (spentByCard[c.id] ?? 0)));
+  }, 0);
 
   const totalAnnualFees = cards.reduce((sum, c) => {
     const cat = CARD_CATALOG.find(x => x.id === c.catalogId);
     return sum + (cat?.annualFee ?? 0);
   }, 0);
 
+  const _today = new Date(); _today.setHours(0, 0, 0, 0);
   const sortedByDue = [...cards]
-    .map(c => ({ ...c, days: daysUntilDue(c.dueDay) }))
-    .filter(c => c.days <= 15)
+    .map(c => ({
+      ...c,
+      days: c.nextPaymentDue
+        ? Math.ceil((new Date(c.nextPaymentDue + 'T00:00:00').getTime() - _today.getTime()) / 86400000)
+        : daysUntilDue(c.dueDay),
+    }))
+    .filter(c => c.days >= 0 && c.days <= 15)
     .sort((a, b) => a.days - b.days);
 
   const feesUpcoming = cards
@@ -641,12 +678,165 @@ export default function App() {
   }
 
   async function handleTogglePaid(card: UserCard) {
-    const newPaidDate = isCardPaid(card) ? null : currentDueDate(card.dueDay);
+    const newPaidDate = isCardPaid(card) ? null : (card.nextPaymentDue ?? currentDueDate(card.dueDay));
     setCards(prev => prev.map(c => c.id === card.id ? { ...c, paidDate: newPaidDate ?? undefined } : c));
     try {
       await setCardPaidDate(card.id, newPaidDate);
     } catch {
       // keep optimistic state even if DB save fails
+    }
+  }
+
+  async function handleConnectBank(card: UserCard) {
+    setConnectingCardId(card.id);
+    try {
+      const token = await plaidGetLinkToken();
+
+      const onSuccess = async (publicToken: string, metadata: any) => {
+        try {
+          const account = metadata?.accounts?.[0];
+          await plaidExchangeToken({
+            publicToken,
+            accountId: account?.id ?? '',
+            cardId: card.id,
+            institutionName: metadata?.institution?.name ?? '',
+            institutionId: metadata?.institution?.institution_id ?? '',
+          });
+          await Promise.all([
+            plaidSyncLiabilities(card.id),
+            plaidSyncTransactions(card.id),
+          ]);
+          const [newCards, newPurchases] = await Promise.all([getCards(), getPurchases()]);
+          setCards(newCards);
+          setPurchases(newPurchases);
+        } catch (e) {
+          Alert.alert('Connection failed', e instanceof Error ? e.message : 'Could not link account');
+        } finally {
+          setConnectingCardId(null);
+        }
+      };
+
+      const onExit = (err: any) => {
+        setConnectingCardId(null);
+        if (err?.displayMessage) Alert.alert('Link error', err.displayMessage);
+      };
+
+      if (Platform.OS === 'web') {
+        await new Promise<void>((resolve, reject) => {
+          if ((window as any).Plaid) { resolve(); return; }
+          const SCRIPT_ID = 'plaid-link-script';
+          let script = document.getElementById(SCRIPT_ID) as HTMLScriptElement | null;
+          if (!script) {
+            script = document.createElement('script');
+            script.id = SCRIPT_ID;
+            script.src = 'https://cdn.plaid.com/link/v2/stable/link-initialize.js';
+            document.head.appendChild(script);
+          }
+          script.addEventListener('load', () => resolve());
+          script.addEventListener('error', () => reject(new Error('Failed to load Plaid')));
+        });
+        (window as any).Plaid.create({
+          token,
+          onSuccess: (public_token: string, metadata: any) => onSuccess(public_token, metadata),
+          onExit: (err: any) => onExit(err?.error ?? err),
+        }).open();
+      } else {
+        if (!_plaidCreate || !_plaidOpen) { setConnectingCardId(null); return; }
+        _plaidCreate({ token });
+        _plaidOpen({
+          onSuccess: (success: any) => onSuccess(success.publicToken, success.metadata),
+          onExit: (exit: any) => onExit(exit?.error),
+        });
+      }
+    } catch (e) {
+      setConnectingCardId(null);
+      console.error('[Plaid Connect]', e);
+      Alert.alert('Error', e instanceof Error ? e.message : 'Could not start bank connection');
+    }
+  }
+
+  async function handleSyncCard(card: UserCard) {
+    setSyncingCardId(card.id);
+    try {
+      await Promise.all([plaidSyncLiabilities(card.id), plaidSyncTransactions(card.id)]);
+      const [newCards, newPurchases] = await Promise.all([getCards(), getPurchases()]);
+      setCards(newCards);
+      setPurchases(newPurchases);
+    } catch (e) {
+      Alert.alert('Sync failed', e instanceof Error ? e.message : 'Could not sync data');
+    } finally {
+      setSyncingCardId(null);
+    }
+  }
+
+  async function handleConnectBankMore() {
+    setConnectingBank(true);
+    try {
+      const token = await plaidGetLinkToken();
+
+      if (Platform.OS === 'web') {
+        await new Promise<void>((resolve, reject) => {
+          if ((window as any).Plaid) { resolve(); return; }
+          const SCRIPT_ID = 'plaid-link-script';
+          let script = document.getElementById(SCRIPT_ID) as HTMLScriptElement | null;
+          if (!script) {
+            script = document.createElement('script');
+            script.id = SCRIPT_ID;
+            script.src = 'https://cdn.plaid.com/link/v2/stable/link-initialize.js';
+            document.head.appendChild(script);
+          }
+          script.addEventListener('load', () => resolve());
+          script.addEventListener('error', () => reject(new Error('Failed to load Plaid script')));
+        });
+
+        (window as any).Plaid.create({
+          token,
+          onSuccess: async (public_token: string, metadata: any) => {
+            try {
+              await plaidExchangeToken({
+                publicToken: public_token,
+                institutionName: metadata?.institution?.name ?? '',
+                institutionId: metadata?.institution?.institution_id ?? '',
+              });
+              Alert.alert('Bank connected!', `${metadata?.institution?.name ?? 'Your bank'} has been linked successfully.`);
+            } catch (e) {
+              Alert.alert('Error', e instanceof Error ? e.message : 'Could not link account');
+            } finally {
+              setConnectingBank(false);
+            }
+          },
+          onExit: () => { setConnectingBank(false); },
+        }).open();
+      } else {
+        if (_plaidCreate && _plaidOpen) {
+          _plaidCreate({ token });
+          _plaidOpen({
+            onSuccess: async (success: any) => {
+              try {
+                await plaidExchangeToken({
+                  publicToken: success.publicToken,
+                  institutionName: success.metadata?.institution?.name ?? '',
+                  institutionId: success.metadata?.institution?.institution_id ?? '',
+                });
+                Alert.alert('Bank connected!', `${success.metadata?.institution?.name ?? 'Your bank'} has been linked.`);
+              } catch (e) {
+                Alert.alert('Error', e instanceof Error ? e.message : 'Could not link account');
+              } finally {
+                setConnectingBank(false);
+              }
+            },
+            onExit: (exit: any) => {
+              setConnectingBank(false);
+              if (exit?.error?.displayMessage) Alert.alert('Link error', exit.error.displayMessage);
+            },
+          });
+        } else {
+          setConnectingBank(false);
+        }
+      }
+    } catch (e) {
+      setConnectingBank(false);
+      Alert.alert('Error', e instanceof Error ? e.message : 'Could not start bank connection');
     }
   }
 
@@ -734,8 +924,6 @@ export default function App() {
   async function saveEdit() {
     setEditError('');
     if (!editingCard) return;
-    const dueDay = parseInt(editForm.dueDay, 10);
-    if (isNaN(dueDay) || dueDay < 1 || dueDay > 31) { setEditError('Enter a due day between 1 and 31.'); return; }
     const isCustom = editingCard.catalogId === 'custom';
     if (isCustom && !editForm.customName.trim()) { setEditError('Card name is required.'); return; }
     const memberSince = editForm.memberSince.trim() ? parseMemberSince(editForm.memberSince) : undefined;
@@ -749,8 +937,8 @@ export default function App() {
         ...editingCard,
         name: isCustom ? editForm.customName.trim() : editingCard.name,
         lastFour: editForm.lastFour.trim(),
-        dueDay,
-        limit: editForm.limit.trim(),
+        dueDay: editingCard.dueDay,
+        limit: editingCard.limit,
         memberSince,
         feeDueDate,
       });
@@ -937,7 +1125,7 @@ export default function App() {
             <View style={ds.homeEmpty}>
               <FontAwesome6 name="credit-card" size={44} color="#CBB9A8" iconStyle="solid" />
               <Text style={ds.homeEmptyTitle}>No cards yet</Text>
-              <Text style={ds.homeEmptySub}>Head to the Cards tab{'\n'}to add your first card</Text>
+              <Text style={ds.homeEmptySub}>Head to the Cards tab to add your first card,{'\n'}or connect your bank from the More tab.</Text>
             </View>
           )}
         </ScrollView>
@@ -997,7 +1185,9 @@ export default function App() {
                           </>
                         )}
                         {card.limit ? (
-                          <Text style={styles.cardDateOpenedLabel}>Limit: {card.limit}</Text>
+                          <Text style={styles.cardDateOpenedLabel}>
+                            {'Limit: $' + parseFloat(card.limit).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+                          </Text>
                         ) : null}
                         <Pressable
                           onPress={() => handleTogglePaid(card)}
@@ -1026,6 +1216,65 @@ export default function App() {
                             {isCardPaid(card) ? 'Paid' : 'Mark Paid'}
                           </Text>
                         </Pressable>
+
+                        {/* Plaid Connect button */}
+                        {!card.plaidAccountId && (
+                          <Pressable
+                            onPress={() => handleConnectBank(card)}
+                            disabled={connectingCardId === card.id}
+                            style={({ pressed }) => ({
+                              alignSelf: 'stretch' as const,
+                              flexDirection: 'row' as const,
+                              alignItems: 'center' as const,
+                              justifyContent: 'center' as const,
+                              gap: 4,
+                              paddingVertical: 5,
+                              borderRadius: 8,
+                              marginTop: 4,
+                              backgroundColor: 'rgba(122,158,126,0.1)',
+                              borderWidth: 1,
+                              borderColor: 'rgba(122,158,126,0.3)',
+                              opacity: pressed || connectingCardId === card.id ? 0.5 : 1,
+                            })}
+                          >
+                            <FontAwesome6 name="building-columns" size={9} color="#7A9E7E" iconStyle="solid" />
+                            <Text style={{ fontSize: 9, fontWeight: '600', color: '#7A9E7E' }}>
+                              {connectingCardId === card.id ? '...' : 'Connect'}
+                            </Text>
+                          </Pressable>
+                        )}
+
+                        {/* Plaid Sync button (linked card) */}
+                        {card.plaidAccountId && (
+                          <View style={{ alignSelf: 'stretch' as const, marginTop: 4, gap: 2 }}>
+                            <Pressable
+                              onPress={() => handleSyncCard(card)}
+                              disabled={syncingCardId === card.id}
+                              style={({ pressed }) => ({
+                                flexDirection: 'row' as const,
+                                alignItems: 'center' as const,
+                                justifyContent: 'center' as const,
+                                gap: 4,
+                                paddingVertical: 5,
+                                borderRadius: 8,
+                                backgroundColor: card.lastSyncedAt ? 'rgba(122,158,126,0.15)' : 'rgba(122,158,126,0.1)',
+                                borderWidth: 1,
+                                borderColor: 'rgba(122,158,126,0.3)',
+                                opacity: pressed || syncingCardId === card.id ? 0.5 : 1,
+                              })}
+                            >
+                              <FontAwesome6
+                                name={syncingCardId === card.id ? 'arrows-rotate' : card.lastSyncedAt ? 'building-columns' : 'arrows-rotate'}
+                                size={9}
+                                color="#7A9E7E"
+                                iconStyle="solid"
+                              />
+                              <Text style={{ fontSize: 9, fontWeight: '600', color: '#7A9E7E' }}>
+                                {syncingCardId === card.id ? 'Syncing' : card.lastSyncedAt ? 'Synced' : 'Sync'}
+                              </Text>
+                            </Pressable>
+                          </View>
+                        )}
                       </View>
 
                       <Pressable
@@ -1044,7 +1293,13 @@ export default function App() {
                             <View style={styles.cardBadgeRow}>
                               {(() => {
                                 const paid = isCardPaid(card);
-                                const urgent = !paid && daysUntilDue(card.dueDay) <= 10;
+                                const days = card.nextPaymentDue
+                                  ? Math.ceil((new Date(card.nextPaymentDue + 'T00:00:00').getTime() - new Date().setHours(0, 0, 0, 0)) / 86400000)
+                                  : daysUntilDue(card.dueDay);
+                                const urgent = !paid && days <= 10;
+                                const dueLabel = card.nextPaymentDue
+                                  ? ordinal(new Date(card.nextPaymentDue + 'T00:00:00').getDate())
+                                  : ordinal(card.dueDay);
                                 return (
                                   <View style={[styles.feeBadge, paid && { backgroundColor: 'rgba(122,158,126,0.15)', borderColor: 'rgba(122,158,126,0.4)', borderWidth: 1 }, urgent && styles.feeBadgeUrgent]}>
                                     {paid
@@ -1054,28 +1309,45 @@ export default function App() {
                                         : null
                                     }
                                     <Text style={[styles.feeBadgeText, paid && { color: '#7A9E7E' }, urgent && styles.feeBadgeTextUrgent]}>
-                                      {paid ? 'Paid' : `Statement Ends: ${ordinal(card.dueDay)}`}
+                                      {paid ? 'Paid' : `Statement Ends: ${dueLabel}`}
                                     </Text>
                                   </View>
                                 );
                               })()}
-                              {card.limit ? (() => {
-                                const limitNum = parseInt(card.limit.replace(/[^0-9]/g, ''), 10);
-                                const spent = spentByCard[card.id] ?? 0;
-                                const available = !isNaN(limitNum) && spent > 0
-                                  ? Math.max(0, limitNum - spent)
-                                  : null;
-                                const nearLimit = available !== null && !isNaN(limitNum) && limitNum > 0
-                                  && available <= limitNum * 0.10;
+                              {card.plaidAccountId && card.currentBalance !== undefined && (() => {
+                                const totalLine = (card.availableCredit ?? 0) + card.currentBalance;
+                                const pct = totalLine > 0 ? card.currentBalance / totalLine : 0;
+                                const isRed = pct > 0.50;
+                                const isCaution = !isRed && pct > 0.30;
+                                const bgColor = isRed ? 'rgba(139,58,58,0.12)' : isCaution ? 'rgba(192,138,91,0.12)' : 'rgba(122,158,126,0.12)';
+                                const textColor = isRed ? '#ff3b30' : isCaution ? '#C08A5B' : '#7A9E7E';
+                                const borderColor = isRed ? '#ff3b30' : isCaution ? 'rgba(192,138,91,0.5)' : 'rgba(122,158,126,0.4)';
                                 return (
-                                  <View style={[styles.feeBadge, nearLimit && { backgroundColor: 'rgba(139,58,58,0.12)', borderWidth: 1, borderColor: '#ff3b30' }]}>
-                                    {nearLimit && (
-                                      <FontAwesome6 name="triangle-exclamation" size={10} color="#ff3b30" iconStyle="solid" />
-                                    )}
-                                    <Text style={[styles.feeBadgeText, nearLimit && { color: '#ff3b30' }]}>
-                                      {available !== null
-                                        ? `$${available.toLocaleString('en-US')}`
-                                        : card.limit}
+                                  <View style={[styles.feeBadge, { backgroundColor: bgColor, borderWidth: 1, borderColor }]}>
+                                    {(isRed || isCaution) && <FontAwesome6 name="triangle-exclamation" size={10} color={textColor} iconStyle="solid" />}
+                                    <Text style={[styles.feeBadgeText, { color: textColor }]}>
+                                      {`Bal: $${card.currentBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+                                    </Text>
+                                  </View>
+                                );
+                              })()}
+                              {card.plaidAccountId && card.minimumPayment !== undefined && (
+                                <View style={[styles.feeBadge, { backgroundColor: 'rgba(192,138,91,0.1)', borderWidth: 1, borderColor: 'rgba(192,138,91,0.3)' }]}>
+                                  <Text style={[styles.feeBadgeText, { color: '#C08A5B' }]}>
+                                    {`Min: $${card.minimumPayment.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+                                  </Text>
+                                </View>
+                              )}
+                              {!card.plaidAccountId && card.limit ? (() => {
+                                const limitNum = parseFloat(card.limit);
+                                const available = limitNum - (spentByCard[card.id] ?? 0);
+                                const nearLimit = limitNum > 0 && available <= limitNum * 0.10;
+                                if (isNaN(limitNum)) return null;
+                                return (
+                                  <View style={[styles.feeBadge, { backgroundColor: nearLimit ? 'rgba(139,58,58,0.12)' : 'rgba(122,158,126,0.12)', borderWidth: 1, borderColor: nearLimit ? '#ff3b30' : 'rgba(122,158,126,0.4)' }]}>
+                                    {nearLimit && <FontAwesome6 name="triangle-exclamation" size={10} color="#ff3b30" iconStyle="solid" />}
+                                    <Text style={[styles.feeBadgeText, { color: nearLimit ? '#ff3b30' : '#7A9E7E' }]}>
+                                      {`$${available.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })} avail`}
                                     </Text>
                                   </View>
                                 );
@@ -1084,6 +1356,26 @@ export default function App() {
                           </View>
 
                           <Text style={styles.cardLast4}>•••• {card.lastFour}</Text>
+
+                          {card.plaidAccountId && card.availableCredit !== undefined && (() => {
+                            const totalLine = (card.availableCredit ?? 0) + (card.currentBalance ?? 0);
+                            const pct = totalLine > 0 ? card.availableCredit / totalLine : 1;
+                            const isRed = pct < 0.30;
+                            const isCaution = !isRed && pct < 0.50;
+                            const bgColor = isRed ? 'rgba(139,58,58,0.12)' : isCaution ? 'rgba(192,138,91,0.12)' : 'rgba(122,158,126,0.12)';
+                            const textColor = isRed ? '#ff3b30' : isCaution ? '#C08A5B' : '#7A9E7E';
+                            const borderColor = isRed ? '#ff3b30' : isCaution ? 'rgba(192,138,91,0.5)' : undefined;
+                            return (
+                              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 4 }}>
+                                <View style={{ backgroundColor: bgColor, borderRadius: 6, paddingHorizontal: 7, paddingVertical: 2, flexDirection: 'row', alignItems: 'center', gap: 4, ...(borderColor && { borderWidth: 1, borderColor }) }}>
+                                  {(isRed || isCaution) && <FontAwesome6 name="triangle-exclamation" size={10} color={textColor} iconStyle="solid" />}
+                                  <Text style={{ fontSize: 10, color: textColor, fontWeight: '600' }}>
+                                    {`Available: $${card.availableCredit.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+                                  </Text>
+                                </View>
+                              </View>
+                            );
+                          })()}
 
                           {annualFee === 0 ? (
                             <View style={styles.noFeePill}>
@@ -1479,6 +1771,37 @@ export default function App() {
 
           <View style={ds.sectionCard}>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
+              <View style={{ width: 36, height: 36, borderRadius: 10, backgroundColor: 'rgba(0,122,255,0.12)', justifyContent: 'center', alignItems: 'center' }}>
+                <FontAwesome6 name="building-columns" size={16} color="#007aff" iconStyle="solid" />
+              </View>
+              <Text style={[ds.sectionTitle, { marginBottom: 0 }]}>Connect Your Bank</Text>
+            </View>
+
+            <Text style={{ fontSize: 13, color: '#6F4E37', lineHeight: 20 }}>
+              Link your bank or credit card account to automatically import real transactions instead of logging them manually.
+            </Text>
+
+            <Pressable
+              onPress={handleConnectBankMore}
+              disabled={connectingBank}
+              style={({ pressed }) => ({
+                marginTop: 4,
+                paddingVertical: 13,
+                borderRadius: 12,
+                alignItems: 'center' as const,
+                backgroundColor: pressed || connectingBank ? 'rgba(0,122,255,0.18)' : 'rgba(0,122,255,0.1)',
+                borderWidth: 1,
+                borderColor: 'rgba(0,122,255,0.3)',
+              })}
+            >
+              <Text style={{ fontSize: 14, fontWeight: '700', color: '#007aff' }}>
+                {connectingBank ? 'Connecting…' : 'Connect Bank Account'}
+              </Text>
+            </Pressable>
+          </View>
+
+          <View style={ds.sectionCard}>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 10 }}>
               <View style={{ width: 36, height: 36, borderRadius: 10, backgroundColor: 'rgba(255,59,48,0.12)', justifyContent: 'center', alignItems: 'center' }}>
                 <FontAwesome6 name="trash-can" size={16} color="#ff3b30" iconStyle="solid" />
               </View>
@@ -1684,27 +2007,6 @@ export default function App() {
                         maxLength={4}
                         value={form.lastFour}
                         onChangeText={(v) => setForm((f) => ({ ...f, lastFour: v }))}
-                      />
-
-                      <Text style={styles.inputLabel}>Due Day (1–31)</Text>
-                      <TextInput
-                        style={styles.input}
-                        placeholder="15"
-                        placeholderTextColor="#aeaeb2"
-                        keyboardType="numeric"
-                        maxLength={2}
-                        value={form.dueDay}
-                        onChangeText={(v) => setForm((f) => ({ ...f, dueDay: v }))}
-                      />
-
-                      <Text style={styles.inputLabel}>Credit Limit</Text>
-                      <TextInput
-                        style={styles.input}
-                        placeholder="$10,000"
-                        placeholderTextColor="#aeaeb2"
-                        keyboardType="numeric"
-                        value={form.limit}
-                        onChangeText={(v) => setForm((f) => ({ ...f, limit: formatCurrency(v) }))}
                       />
 
                       <Text style={styles.inputLabel}>Card Opened (MM/YYYY)</Text>
@@ -1993,27 +2295,6 @@ export default function App() {
                       maxLength={4}
                       value={editForm.lastFour}
                       onChangeText={(v) => setEditForm(f => ({ ...f, lastFour: v }))}
-                    />
-
-                    <Text style={styles.inputLabel}>Due Day (1–31)</Text>
-                    <TextInput
-                      style={styles.input}
-                      placeholder="15"
-                      placeholderTextColor="#aeaeb2"
-                      keyboardType="numeric"
-                      maxLength={2}
-                      value={editForm.dueDay}
-                      onChangeText={(v) => setEditForm(f => ({ ...f, dueDay: v }))}
-                    />
-
-                    <Text style={styles.inputLabel}>Credit Limit</Text>
-                    <TextInput
-                      style={styles.input}
-                      placeholder="$10,000"
-                      placeholderTextColor="#aeaeb2"
-                      keyboardType="numeric"
-                      value={editForm.limit}
-                      onChangeText={(v) => setEditForm(f => ({ ...f, limit: formatCurrency(v) }))}
                     />
 
                     <Text style={styles.inputLabel}>Card Opened (MM/YYYY)</Text>
