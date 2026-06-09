@@ -27,7 +27,15 @@
       "predictiveBackGestureEnabled": false
     },
     "web": {
-      "favicon": "./assets/favicon.png"
+      "favicon": "./assets/favicon.png",
+      "name": "Esspressowe",
+      "shortName": "Esspressowe",
+      "description": "Personal credit card manager",
+      "backgroundColor": "#2A211C",
+      "themeColor": "#5a473e",
+      "display": "standalone",
+      "orientation": "portrait",
+      "lang": "en"
     },
     "plugins": [
       "expo-dev-client"
