@@ -1425,23 +1425,6 @@ export default function App() {
                                   </View>
                                 );
                               })()}
-                              {card.plaidAccountId && card.currentBalance !== undefined && (() => {
-                                const totalLine = (card.availableCredit ?? 0) + card.currentBalance;
-                                const pct = totalLine > 0 ? card.currentBalance / totalLine : 0;
-                                const isRed = pct > 0.50;
-                                const isCaution = !isRed && pct > 0.30;
-                                const bgColor = isRed ? 'rgba(139,58,58,0.12)' : isCaution ? 'rgba(192,138,91,0.12)' : 'rgba(122,158,126,0.12)';
-                                const textColor = isRed ? '#ff3b30' : isCaution ? '#C08A5B' : '#7A9E7E';
-                                const borderColor = isRed ? '#ff3b30' : isCaution ? 'rgba(192,138,91,0.5)' : 'rgba(122,158,126,0.4)';
-                                return (
-                                  <View style={[styles.feeBadge, { backgroundColor: bgColor, borderWidth: 1, borderColor }]}>
-                                    {(isRed || isCaution) && <FontAwesome6 name="triangle-exclamation" size={10} color={textColor} iconStyle="solid" />}
-                                    <Text style={[styles.feeBadgeText, { color: textColor }]}>
-                                      {`Bal: $${card.currentBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
-                                    </Text>
-                                  </View>
-                                );
-                              })()}
                               {card.plaidAccountId && card.minimumPayment !== undefined && (
                                 <View style={[styles.feeBadge, { backgroundColor: 'rgba(192,138,91,0.1)', borderWidth: 1, borderColor: 'rgba(192,138,91,0.3)' }]}>
                                   <Text style={[styles.feeBadgeText, { color: '#C08A5B' }]}>
@@ -1468,22 +1451,42 @@ export default function App() {
 
                           <Text style={styles.cardLast4}>•••• {card.lastFour}</Text>
 
-                          {card.plaidAccountId && card.availableCredit !== undefined && (() => {
+                          {card.plaidAccountId && (card.currentBalance !== undefined || card.availableCredit !== undefined) && (() => {
                             const totalLine = (card.availableCredit ?? 0) + (card.currentBalance ?? 0);
-                            const pct = totalLine > 0 ? card.availableCredit / totalLine : 1;
-                            const isRed = pct < 0.30;
-                            const isCaution = !isRed && pct < 0.50;
-                            const bgColor = isRed ? 'rgba(139,58,58,0.12)' : isCaution ? 'rgba(192,138,91,0.12)' : 'rgba(122,158,126,0.12)';
-                            const textColor = isRed ? '#ff3b30' : isCaution ? '#C08A5B' : '#7A9E7E';
-                            const borderColor = isRed ? '#ff3b30' : isCaution ? 'rgba(192,138,91,0.5)' : undefined;
+                            const balPct = totalLine > 0 && card.currentBalance !== undefined ? card.currentBalance / totalLine : 0;
+                            const balRed = balPct > 0.50;
+                            const balCaution = !balRed && balPct > 0.30;
+                            const balBg = balRed ? 'rgba(139,58,58,0.12)' : balCaution ? 'rgba(192,138,91,0.12)' : 'rgba(122,158,126,0.12)';
+                            const balColor = balRed ? '#ff3b30' : balCaution ? '#C08A5B' : '#7A9E7E';
+                            const balBorder = balRed ? '#ff3b30' : balCaution ? 'rgba(192,138,91,0.5)' : 'rgba(122,158,126,0.4)';
+                            const availPct = totalLine > 0 && card.availableCredit !== undefined ? card.availableCredit / totalLine : 1;
+                            const availRed = availPct < 0.30;
+                            const availCaution = !availRed && availPct < 0.50;
+                            const availBg = availRed ? 'rgba(139,58,58,0.12)' : availCaution ? 'rgba(192,138,91,0.12)' : 'rgba(122,158,126,0.12)';
+                            const availColor = availRed ? '#ff3b30' : availCaution ? '#C08A5B' : '#7A9E7E';
+                            const availBorder = availRed ? '#ff3b30' : availCaution ? 'rgba(192,138,91,0.5)' : undefined;
                             return (
-                              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 4 }}>
-                                <View style={{ backgroundColor: bgColor, borderRadius: 6, paddingHorizontal: 7, paddingVertical: 2, flexDirection: 'row', alignItems: 'center', gap: 4, ...(borderColor && { borderWidth: 1, borderColor }) }}>
-                                  {(isRed || isCaution) && <FontAwesome6 name="triangle-exclamation" size={10} color={textColor} iconStyle="solid" />}
-                                  <Text style={{ fontSize: 10, color: textColor, fontWeight: '600' }}>
-                                    {`Available: $${card.availableCredit.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
-                                  </Text>
-                                </View>
+                              <View style={{ gap: 4, marginTop: 4 }}>
+                                {card.currentBalance !== undefined && (
+                                  <View style={{ flexDirection: 'row' }}>
+                                    <View style={{ backgroundColor: balBg, borderRadius: 6, paddingHorizontal: 7, paddingVertical: 2, flexDirection: 'row', alignItems: 'center', gap: 4, borderWidth: 1, borderColor: balBorder }}>
+                                      {(balRed || balCaution) && <FontAwesome6 name="triangle-exclamation" size={10} color={balColor} iconStyle="solid" />}
+                                      <Text style={{ fontSize: 10, color: balColor, fontWeight: '600' }}>
+                                        {`Bal: $${card.currentBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+                                      </Text>
+                                    </View>
+                                  </View>
+                                )}
+                                {card.availableCredit !== undefined && (
+                                  <View style={{ flexDirection: 'row' }}>
+                                    <View style={{ backgroundColor: availBg, borderRadius: 6, paddingHorizontal: 7, paddingVertical: 2, flexDirection: 'row', alignItems: 'center', gap: 4, ...(availBorder && { borderWidth: 1, borderColor: availBorder }) }}>
+                                      {(availRed || availCaution) && <FontAwesome6 name="triangle-exclamation" size={10} color={availColor} iconStyle="solid" />}
+                                      <Text style={{ fontSize: 10, color: availColor, fontWeight: '600' }}>
+                                        {`Available: $${card.availableCredit.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+                                      </Text>
+                                    </View>
+                                  </View>
+                                )}
                               </View>
                             );
                           })()}
