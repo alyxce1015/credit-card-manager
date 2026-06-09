@@ -457,6 +457,7 @@ export default function App() {
   const [pinInput, setPinInput] = useState('');
   const [pinError, setPinError] = useState(false);
   const pinShakeAnim = useRef(new Animated.Value(0)).current;
+  const unlockedRef = useRef(unlocked);
 
   const stepAnim = useRef(new Animated.Value(1)).current;
 
@@ -474,6 +475,44 @@ export default function App() {
     return () => clearInterval(id);
   }, []);
 
+  // Keep ref in sync so the inactivity interval always sees current unlock state
+  useEffect(() => { unlockedRef.current = unlocked; }, [unlocked]);
+
+  // Track any user interaction to reset the inactivity clock
+  useEffect(() => {
+    if (!APP_PIN || typeof document === 'undefined') return;
+    const reset = () => {
+      try { window.localStorage.setItem('espressowe_last_activity', String(Date.now())); } catch {}
+    };
+    document.addEventListener('touchstart', reset, { passive: true });
+    document.addEventListener('mousedown', reset);
+    document.addEventListener('keydown', reset);
+    return () => {
+      document.removeEventListener('touchstart', reset);
+      document.removeEventListener('mousedown', reset);
+      document.removeEventListener('keydown', reset);
+    };
+  }, [APP_PIN]);
+
+  // On mount: lock if already timed out. Interval: lock after 15 min of inactivity.
+  useEffect(() => {
+    if (!APP_PIN) return;
+    const INACTIVITY_MS = 15 * 60 * 1000;
+    const checkInactivity = () => {
+      if (!unlockedRef.current) return;
+      try {
+        const last = parseInt(window.localStorage.getItem('espressowe_last_activity') ?? '0', 10);
+        if (last > 0 && Date.now() - last > INACTIVITY_MS) {
+          window.localStorage.removeItem('espressowe_pin_ok');
+          setUnlocked(false);
+        }
+      } catch {}
+    };
+    checkInactivity();
+    const id = setInterval(checkInactivity, 30_000);
+    return () => clearInterval(id);
+  }, [APP_PIN]);
+
   if (!fontsLoaded) return null;
 
   // ── PIN gate ────────────────────────────────────────────────────────────────
@@ -482,7 +521,10 @@ export default function App() {
     const next = pinInput + d;
     if (next.length < 4) { setPinInput(next); return; }
     if (next === APP_PIN) {
-      try { window.localStorage.setItem('espressowe_pin_ok', '1'); } catch {}
+      try {
+        window.localStorage.setItem('espressowe_pin_ok', '1');
+        window.localStorage.setItem('espressowe_last_activity', String(Date.now()));
+      } catch {}
       setPinInput('');
       setUnlocked(true);
     } else {
