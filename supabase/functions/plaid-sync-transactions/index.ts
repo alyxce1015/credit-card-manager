@@ -61,6 +61,8 @@ Deno.serve(async (req) => {
 
   let cursor = connection?.cursor ?? null
   let added: any[] = []
+  let modified: any[] = []
+  let removed: any[] = []
   let hasMore = true
 
   while (hasMore) {
@@ -76,7 +78,15 @@ Deno.serve(async (req) => {
     })
 
     const syncData = await syncRes.json()
-    added = added.concat(syncData.added)
+    if (syncData.error_code) {
+      return new Response(JSON.stringify({ error: `Plaid sync error: ${syncData.error_message}` }), {
+        status: 400,
+        headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+      })
+    }
+    added = added.concat(syncData.added ?? [])
+    modified = modified.concat(syncData.modified ?? [])
+    removed = removed.concat(syncData.removed ?? [])
     hasMore = syncData.has_more
     cursor = syncData.next_cursor
   }
@@ -87,8 +97,8 @@ Deno.serve(async (req) => {
     .update({ cursor })
     .eq('item_id', card.plaid_item_id)
 
-  // Upsert transactions
-  const purchases = added
+  // Upsert added + modified transactions
+  const toUpsert = [...added, ...modified]
     .filter((t: any) => t.account_id === card.plaid_account_id)
     .map((t: any) => ({
       id: t.transaction_id,
@@ -99,11 +109,17 @@ Deno.serve(async (req) => {
       date: t.date,
     }))
 
-  if (purchases.length > 0) {
-    await supabase.from('purchases').upsert(purchases)
+  if (toUpsert.length > 0) {
+    await supabase.from('purchases').upsert(toUpsert)
   }
 
-  return new Response(JSON.stringify({ synced: purchases.length }), {
+  // Delete removed transactions
+  const removedIds = removed.map((t: any) => t.transaction_id).filter(Boolean)
+  if (removedIds.length > 0) {
+    await supabase.from('purchases').delete().in('id', removedIds)
+  }
+
+  return new Response(JSON.stringify({ synced: toUpsert.length, removed: removedIds.length }), {
     headers: { ...corsHeaders, 'Content-Type': 'application/json' },
   })
 })

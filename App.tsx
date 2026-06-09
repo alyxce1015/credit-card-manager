@@ -593,14 +593,18 @@ export default function App() {
     acc[p.cardId] = (acc[p.cardId] ?? 0) + p.amount;
     return acc;
   }, {});
-  const totalSpent = Object.values(spentByCard).reduce((sum, n) => sum + n, 0);
+  const totalSpent = cards.reduce((sum, c) => {
+    if (c.currentBalance !== undefined) return sum + c.currentBalance;
+    return sum + (spentByCard[c.id] ?? 0);
+  }, 0);
 
   const totalLimitValue = cards.reduce((sum, c) => {
+    const manualLimit = parseInt((c.limit ?? '').replace(/[^0-9]/g, ''), 10);
+    if (!isNaN(manualLimit) && manualLimit > 0) return sum + manualLimit;
     if (c.availableCredit !== undefined || c.currentBalance !== undefined) {
       return sum + (c.availableCredit ?? 0) + (c.currentBalance ?? 0);
     }
-    const n = parseInt((c.limit ?? '').replace(/[^0-9]/g, ''), 10);
-    return sum + (isNaN(n) ? 0 : n);
+    return sum;
   }, 0);
   const totalAvailable = cards.reduce((sum, c) => {
     if (c.availableCredit !== undefined) return sum + c.availableCredit;
@@ -615,8 +619,12 @@ export default function App() {
 
   const _today = new Date(); _today.setHours(0, 0, 0, 0);
   const sortedByDue = [...cards]
-    .filter(c => c.nextPaymentDue)
-    .map(c => ({ ...c, days: Math.ceil((new Date(c.nextPaymentDue! + 'T00:00:00').getTime() - _today.getTime()) / 86400000) }))
+    .map(c => ({
+      ...c,
+      days: c.nextPaymentDue
+        ? Math.ceil((new Date(c.nextPaymentDue + 'T00:00:00').getTime() - _today.getTime()) / 86400000)
+        : daysUntilDue(c.dueDay),
+    }))
     .filter(c => c.days >= 0 && c.days <= 15)
     .sort((a, b) => a.days - b.days);
 
@@ -698,7 +706,9 @@ export default function App() {
             plaidSyncLiabilities(card.id),
             plaidSyncTransactions(card.id),
           ]);
-          setCards(await getCards());
+          const [newCards, newPurchases] = await Promise.all([getCards(), getPurchases()]);
+          setCards(newCards);
+          setPurchases(newPurchases);
         } catch (e) {
           Alert.alert('Connection failed', e instanceof Error ? e.message : 'Could not link account');
         } finally {
@@ -740,6 +750,7 @@ export default function App() {
       }
     } catch (e) {
       setConnectingCardId(null);
+      console.error('[Plaid Connect]', e);
       Alert.alert('Error', e instanceof Error ? e.message : 'Could not start bank connection');
     }
   }
@@ -1174,7 +1185,9 @@ export default function App() {
                           </>
                         )}
                         {card.limit ? (
-                          <Text style={styles.cardDateOpenedLabel}>Limit: {card.limit}</Text>
+                          <Text style={styles.cardDateOpenedLabel}>
+                            {'Limit: $' + parseFloat(card.limit).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+                          </Text>
                         ) : null}
                         <Pressable
                           onPress={() => handleTogglePaid(card)}
@@ -1280,14 +1293,13 @@ export default function App() {
                             <View style={styles.cardBadgeRow}>
                               {(() => {
                                 const paid = isCardPaid(card);
-                                if (!paid && !card.nextPaymentDue) return null;
                                 const days = card.nextPaymentDue
                                   ? Math.ceil((new Date(card.nextPaymentDue + 'T00:00:00').getTime() - new Date().setHours(0, 0, 0, 0)) / 86400000)
-                                  : null;
-                                const urgent = !paid && days !== null && days <= 10;
+                                  : daysUntilDue(card.dueDay);
+                                const urgent = !paid && days <= 10;
                                 const dueLabel = card.nextPaymentDue
                                   ? ordinal(new Date(card.nextPaymentDue + 'T00:00:00').getDate())
-                                  : '';
+                                  : ordinal(card.dueDay);
                                 return (
                                   <View style={[styles.feeBadge, paid && { backgroundColor: 'rgba(122,158,126,0.15)', borderColor: 'rgba(122,158,126,0.4)', borderWidth: 1 }, urgent && styles.feeBadgeUrgent]}>
                                     {paid
@@ -1302,31 +1314,40 @@ export default function App() {
                                   </View>
                                 );
                               })()}
-                              {card.limit && card.currentBalance !== undefined ? (() => {
-                                const limitNum = parseFloat(card.limit);
-                                const available = limitNum - card.currentBalance;
-                                const nearLimit = limitNum > 0 && available <= limitNum * 0.10;
+                              {card.plaidAccountId && card.currentBalance !== undefined && (() => {
+                                const totalLine = (card.availableCredit ?? 0) + card.currentBalance;
+                                const pct = totalLine > 0 ? card.currentBalance / totalLine : 0;
+                                const isRed = pct > 0.50;
+                                const isCaution = !isRed && pct > 0.30;
+                                const bgColor = isRed ? 'rgba(139,58,58,0.12)' : isCaution ? 'rgba(192,138,91,0.12)' : 'rgba(122,158,126,0.12)';
+                                const textColor = isRed ? '#ff3b30' : isCaution ? '#C08A5B' : '#7A9E7E';
+                                const borderColor = isRed ? '#ff3b30' : isCaution ? 'rgba(192,138,91,0.5)' : 'rgba(122,158,126,0.4)';
                                 return (
-                                  <View style={[styles.feeBadge, { backgroundColor: nearLimit ? 'rgba(139,58,58,0.12)' : 'rgba(122,158,126,0.12)', borderWidth: 1, borderColor: nearLimit ? '#ff3b30' : 'rgba(122,158,126,0.4)' }]}>
-                                    {nearLimit && (
-                                      <FontAwesome6 name="triangle-exclamation" size={10} color="#ff3b30" iconStyle="solid" />
-                                    )}
-                                    <Text style={[styles.feeBadgeText, { color: nearLimit ? '#ff3b30' : '#7A9E7E' }]}>
-                                      {`$${available.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })} avail`}
+                                  <View style={[styles.feeBadge, { backgroundColor: bgColor, borderWidth: 1, borderColor }]}>
+                                    {(isRed || isCaution) && <FontAwesome6 name="triangle-exclamation" size={10} color={textColor} iconStyle="solid" />}
+                                    <Text style={[styles.feeBadgeText, { color: textColor }]}>
+                                      {`Bal: $${card.currentBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
                                     </Text>
                                   </View>
                                 );
-                              })() : null}
-                              {card.availableCredit !== undefined ? (() => {
-                                const totalLine = (card.availableCredit ?? 0) + (card.currentBalance ?? 0);
-                                const nearLimit = totalLine > 0 && card.availableCredit <= totalLine * 0.10;
+                              })()}
+                              {card.plaidAccountId && card.minimumPayment !== undefined && (
+                                <View style={[styles.feeBadge, { backgroundColor: 'rgba(192,138,91,0.1)', borderWidth: 1, borderColor: 'rgba(192,138,91,0.3)' }]}>
+                                  <Text style={[styles.feeBadgeText, { color: '#C08A5B' }]}>
+                                    {`Min: $${card.minimumPayment.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+                                  </Text>
+                                </View>
+                              )}
+                              {!card.plaidAccountId && card.limit ? (() => {
+                                const limitNum = parseFloat(card.limit);
+                                const available = limitNum - (spentByCard[card.id] ?? 0);
+                                const nearLimit = limitNum > 0 && available <= limitNum * 0.10;
+                                if (isNaN(limitNum)) return null;
                                 return (
-                                  <View style={[styles.feeBadge, nearLimit && { backgroundColor: 'rgba(139,58,58,0.12)', borderWidth: 1, borderColor: '#ff3b30' }]}>
-                                    {nearLimit && (
-                                      <FontAwesome6 name="triangle-exclamation" size={10} color="#ff3b30" iconStyle="solid" />
-                                    )}
-                                    <Text style={[styles.feeBadgeText, nearLimit && { color: '#ff3b30' }]}>
-                                      {`$${card.availableCredit.toLocaleString('en-US')}`}
+                                  <View style={[styles.feeBadge, { backgroundColor: nearLimit ? 'rgba(139,58,58,0.12)' : 'rgba(122,158,126,0.12)', borderWidth: 1, borderColor: nearLimit ? '#ff3b30' : 'rgba(122,158,126,0.4)' }]}>
+                                    {nearLimit && <FontAwesome6 name="triangle-exclamation" size={10} color="#ff3b30" iconStyle="solid" />}
+                                    <Text style={[styles.feeBadgeText, { color: nearLimit ? '#ff3b30' : '#7A9E7E' }]}>
+                                      {`$${available.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })} avail`}
                                     </Text>
                                   </View>
                                 );
@@ -1336,38 +1357,25 @@ export default function App() {
 
                           <Text style={styles.cardLast4}>•••• {card.lastFour}</Text>
 
-                          {/* Plaid balance data */}
-                          {card.plaidAccountId && (card.currentBalance !== undefined || card.availableCredit !== undefined || card.minimumPayment !== undefined || card.nextPaymentDue) && (
-                            <View style={{ gap: 4, marginTop: 6, marginBottom: 2 }}>
-                              {card.availableCredit !== undefined && (
-                                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 5 }}>
-                                  <View style={{ backgroundColor: 'rgba(122,158,126,0.12)', borderRadius: 6, paddingHorizontal: 7, paddingVertical: 2 }}>
-                                    <Text style={{ fontSize: 10, color: '#7A9E7E', fontWeight: '600' }}>
-                                      {'Avail: $' + card.availableCredit.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                                    </Text>
-                                  </View>
+                          {card.plaidAccountId && card.availableCredit !== undefined && (() => {
+                            const totalLine = (card.availableCredit ?? 0) + (card.currentBalance ?? 0);
+                            const pct = totalLine > 0 ? card.availableCredit / totalLine : 1;
+                            const isRed = pct < 0.30;
+                            const isCaution = !isRed && pct < 0.50;
+                            const bgColor = isRed ? 'rgba(139,58,58,0.12)' : isCaution ? 'rgba(192,138,91,0.12)' : 'rgba(122,158,126,0.12)';
+                            const textColor = isRed ? '#ff3b30' : isCaution ? '#C08A5B' : '#7A9E7E';
+                            const borderColor = isRed ? '#ff3b30' : isCaution ? 'rgba(192,138,91,0.5)' : undefined;
+                            return (
+                              <View style={{ flexDirection: 'row', alignItems: 'center', gap: 4, marginTop: 4 }}>
+                                <View style={{ backgroundColor: bgColor, borderRadius: 6, paddingHorizontal: 7, paddingVertical: 2, flexDirection: 'row', alignItems: 'center', gap: 4, ...(borderColor && { borderWidth: 1, borderColor }) }}>
+                                  {(isRed || isCaution) && <FontAwesome6 name="triangle-exclamation" size={10} color={textColor} iconStyle="solid" />}
+                                  <Text style={{ fontSize: 10, color: textColor, fontWeight: '600' }}>
+                                    {`Available: $${card.availableCredit.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+                                  </Text>
                                 </View>
-                              )}
-                              {(card.minimumPayment !== undefined || card.nextPaymentDue) && (
-                                <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 5 }}>
-                                  {card.minimumPayment !== undefined && (
-                                    <View style={{ backgroundColor: 'rgba(192,138,91,0.1)', borderRadius: 6, paddingHorizontal: 7, paddingVertical: 2 }}>
-                                      <Text style={{ fontSize: 10, color: '#C08A5B', fontWeight: '600' }}>
-                                        {'Min: $' + card.minimumPayment.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
-                                      </Text>
-                                    </View>
-                                  )}
-                                  {card.nextPaymentDue && (
-                                    <View style={{ backgroundColor: 'rgba(192,138,91,0.1)', borderRadius: 6, paddingHorizontal: 7, paddingVertical: 2 }}>
-                                      <Text style={{ fontSize: 10, color: '#C08A5B', fontWeight: '600' }}>
-                                        {'Due: ' + new Date(card.nextPaymentDue + 'T00:00:00').toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}
-                                      </Text>
-                                    </View>
-                                  )}
-                                </View>
-                              )}
-                            </View>
-                          )}
+                              </View>
+                            );
+                          })()}
 
                           {annualFee === 0 ? (
                             <View style={styles.noFeePill}>

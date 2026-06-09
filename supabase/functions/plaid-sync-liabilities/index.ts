@@ -78,6 +78,7 @@ Deno.serve(async (req) => {
     (l: any) => l.account_id === card.plaid_account_id
   )
 
+  const plaidLimit = account?.balances?.limit
   await supabase.from('cards').update({
     current_balance: account?.balances?.current ?? null,
     available_credit: account?.balances?.available ?? null,
@@ -85,6 +86,7 @@ Deno.serve(async (req) => {
     minimum_payment: liability?.minimum_payment_amount ?? null,
     next_payment_due: liability?.next_payment_due_date ?? null,
     last_synced_at: new Date().toISOString(),
+    ...(plaidLimit != null && { card_limit: String(plaidLimit) }),
   }).eq('id', card_id)
 
   return new Response(JSON.stringify({ success: true }), {
