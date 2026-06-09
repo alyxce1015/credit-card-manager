@@ -959,7 +959,7 @@ export default function App() {
 
           {/* App title */}
           <View style={{ alignItems: 'center', gap: 8 }}>
-            <Text style={ds.appTitle}>Esspressowe</Text>
+            <Text style={ds.appTitle}>Espressowe</Text>
             <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8, width: '55%' }}>
               <View style={{ flex: 1, height: 1, backgroundColor: 'rgba(192,138,91,0.45)' }} />
               <FontAwesome6 name="mug-hot" size={10} color="#C08A5B" iconStyle="solid" />

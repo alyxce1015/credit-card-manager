@@ -1,6 +1,6 @@
 {
   "expo": {
-    "name": "credit-card-manager",
+    "name": "Espressowe",
     "slug": "credit-card-manager",
     "version": "1.0.0",
     "orientation": "portrait",
@@ -27,9 +27,9 @@
       "predictiveBackGestureEnabled": false
     },
     "web": {
-      "favicon": "./assets/favicon.png",
-      "name": "Esspressowe",
-      "shortName": "Esspressowe",
+      "favicon": "./assets/latte-art.png",
+      "name": "Espressowe",
+      "shortName": "Espressowe",
       "description": "Personal credit card manager",
       "backgroundColor": "#2A211C",
       "themeColor": "#5a473e",
