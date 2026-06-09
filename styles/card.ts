@@ -115,16 +115,16 @@ export const cardStyles = StyleSheet.create({
   cardBadgeRow: {
     flexDirection: 'row',
     gap: 6,
-    flexShrink: 0,
+    flexWrap: 'wrap',
   },
   feeBadge: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 5,
+    gap: 4,
     backgroundColor: '#6d4c2f',
     borderRadius: 20,
-    paddingHorizontal: 10,
-    paddingVertical: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
     flexShrink: 0,
   },
   feeBadgeUrgent: {
@@ -134,7 +134,7 @@ export const cardStyles = StyleSheet.create({
   },
   feeBadgeText: {
     color: '#F8F4EF',
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: '700',
   },
   feeBadgeTextUrgent: {
