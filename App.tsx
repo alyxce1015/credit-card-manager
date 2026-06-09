@@ -449,6 +449,15 @@ export default function App() {
   const [syncingCardId, setSyncingCardId] = useState<string | null>(null);
   const [connectingBank, setConnectingBank] = useState(false);
 
+  const APP_PIN = process.env.EXPO_PUBLIC_APP_PIN ?? '';
+  const [unlocked, setUnlocked] = useState<boolean>(() => {
+    if (!APP_PIN) return true;
+    try { return typeof window !== 'undefined' && window.localStorage?.getItem('espressowe_pin_ok') === '1'; } catch { return false; }
+  });
+  const [pinInput, setPinInput] = useState('');
+  const [pinError, setPinError] = useState(false);
+  const pinShakeAnim = useRef(new Animated.Value(0)).current;
+
   const stepAnim = useRef(new Animated.Value(1)).current;
 
   useEffect(() => {
@@ -466,6 +475,66 @@ export default function App() {
   }, []);
 
   if (!fontsLoaded) return null;
+
+  // ── PIN gate ────────────────────────────────────────────────────────────────
+  function handlePinDigit(d: string) {
+    if (pinError) return;
+    const next = pinInput + d;
+    if (next.length < 4) { setPinInput(next); return; }
+    if (next === APP_PIN) {
+      try { window.localStorage.setItem('espressowe_pin_ok', '1'); } catch {}
+      setPinInput('');
+      setUnlocked(true);
+    } else {
+      setPinInput('');
+      setPinError(true);
+      Animated.sequence([
+        Animated.timing(pinShakeAnim, { toValue: 10, duration: 60, useNativeDriver: true }),
+        Animated.timing(pinShakeAnim, { toValue: -10, duration: 60, useNativeDriver: true }),
+        Animated.timing(pinShakeAnim, { toValue: 8, duration: 60, useNativeDriver: true }),
+        Animated.timing(pinShakeAnim, { toValue: -8, duration: 60, useNativeDriver: true }),
+        Animated.timing(pinShakeAnim, { toValue: 0, duration: 60, useNativeDriver: true }),
+      ]).start(() => setPinError(false));
+    }
+  }
+
+  if (!unlocked) {
+    const pad = [['1','2','3'],['4','5','6'],['7','8','9'],['','0','⌫']];
+    return (
+      <View style={{ flex: 1, backgroundColor: '#2A211C', alignItems: 'center', justifyContent: 'center' }}>
+        <StatusBar style="light" />
+        <Text style={{ fontSize: 28, fontWeight: '800', color: '#F8F4EF', letterSpacing: 1, marginBottom: 6 }}>Espressowe</Text>
+        <Text style={{ fontSize: 13, color: '#CBB9A8', marginBottom: 48 }}>Enter your PIN to continue</Text>
+        <Animated.View style={{ flexDirection: 'row', gap: 16, marginBottom: 48, transform: [{ translateX: pinShakeAnim }] }}>
+          {[0,1,2,3].map(i => (
+            <View key={i} style={{
+              width: 14, height: 14, borderRadius: 7,
+              backgroundColor: pinError ? '#ff3b30' : i < pinInput.length ? '#C08A5B' : 'rgba(192,138,91,0.25)',
+            }} />
+          ))}
+        </Animated.View>
+        <View style={{ gap: 14 }}>
+          {pad.map((row, ri) => (
+            <View key={ri} style={{ flexDirection: 'row', gap: 14 }}>
+              {row.map((key, ki) => (
+                <Pressable
+                  key={ki}
+                  onPress={() => key === '⌫' ? setPinInput(p => p.slice(0,-1)) : key ? handlePinDigit(key) : null}
+                  style={({ pressed }) => ({
+                    width: 80, height: 80, borderRadius: 40,
+                    backgroundColor: key ? pressed ? 'rgba(192,138,91,0.25)' : 'rgba(255,255,255,0.07)' : 'transparent',
+                    alignItems: 'center', justifyContent: 'center',
+                  })}
+                >
+                  <Text style={{ fontSize: key === '⌫' ? 20 : 26, fontWeight: '500', color: '#F8F4EF' }}>{key}</Text>
+                </Pressable>
+              ))}
+            </View>
+          ))}
+        </View>
+      </View>
+    );
+  }
 
   function enterSelectMode() {
     setSelectMode(true);
