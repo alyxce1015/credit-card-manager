@@ -11,18 +11,40 @@ const PLAID_ENV = Deno.env.get('PLAID_ENV') ?? 'sandbox'
 const PLAID_BASE_URL = `https://${PLAID_ENV}.plaid.com`
 
 const categoryMap: Record<string, string> = {
+  // Food
   'Food and Drink': 'food',
   'Restaurants': 'food',
-  'Travel': 'travel',
-  'Airlines and Aviation Services': 'travel',
-  'Gas Stations': 'gas',
+  'Coffee Shop': 'food',
+  'Fast Food': 'food',
+  'Bakeries': 'food',
+  'Delis': 'food',
+  'Catering': 'food',
+  'Food Courts': 'food',
+  'Bar': 'food',
+  'Breweries': 'food',
+  // Grocery
   'Supermarkets and Groceries': 'grocery',
+  'Warehouse Clubs': 'grocery',
+  // Gas
+  'Gas Stations': 'gas',
+  // Travel
+  'Airlines and Aviation Services': 'travel',
+  'Hotels': 'travel',
+  'Car Rental': 'travel',
+  'Travel': 'travel',
+  // Online
   'Digital Purchase': 'online',
+  'Internet Services': 'online',
+  // Store (broad fallback — listed last so specific sub-categories win)
   'Shops': 'store',
+  'Department Stores': 'store',
+  'Clothing and Accessories': 'store',
+  'Electronics': 'store',
 }
 
 function mapCategory(plaidCategory: string[]): string {
-  for (const cat of plaidCategory) {
+  // Iterate most-specific to most-general so sub-categories win over broad parents
+  for (const cat of [...plaidCategory].reverse()) {
     if (categoryMap[cat]) return categoryMap[cat]
   }
   return 'store'
