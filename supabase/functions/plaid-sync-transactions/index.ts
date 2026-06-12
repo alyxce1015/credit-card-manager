@@ -10,42 +10,37 @@ const PLAID_SECRET = Deno.env.get('PLAID_SECRET')!
 const PLAID_ENV = Deno.env.get('PLAID_ENV') ?? 'sandbox'
 const PLAID_BASE_URL = `https://${PLAID_ENV}.plaid.com`
 
-const categoryMap: Record<string, string> = {
-  // Food
-  'Food and Drink': 'food',
-  'Restaurants': 'food',
-  'Coffee Shop': 'food',
-  'Fast Food': 'food',
-  'Bakeries': 'food',
-  'Delis': 'food',
-  'Catering': 'food',
-  'Food Courts': 'food',
-  'Bar': 'food',
-  'Breweries': 'food',
-  // Grocery
-  'Supermarkets and Groceries': 'grocery',
-  'Warehouse Clubs': 'grocery',
-  // Gas
-  'Gas Stations': 'gas',
-  // Travel
-  'Airlines and Aviation Services': 'travel',
-  'Hotels': 'travel',
-  'Car Rental': 'travel',
-  'Travel': 'travel',
-  // Online
-  'Digital Purchase': 'online',
-  'Internet Services': 'online',
-  // Store (broad fallback — listed last so specific sub-categories win)
-  'Shops': 'store',
-  'Department Stores': 'store',
-  'Clothing and Accessories': 'store',
-  'Electronics': 'store',
-}
+function mapCategory(t: any): string {
+  // Use personal_finance_category (modern Plaid field) first
+  const pfc = t.personal_finance_category
+  if (pfc?.primary) {
+    const primary: string = pfc.primary
+    const detailed: string = pfc.detailed ?? ''
 
-function mapCategory(plaidCategory: string[]): string {
-  // Iterate most-specific to most-general so sub-categories win over broad parents
-  for (const cat of [...plaidCategory].reverse()) {
-    if (categoryMap[cat]) return categoryMap[cat]
+    if (detailed.startsWith('TRANSPORTATION_GAS')) return 'gas'
+    if (primary === 'FOOD_AND_DRINK') {
+      return detailed === 'FOOD_AND_DRINK_GROCERIES' ? 'grocery' : 'food'
+    }
+    if (primary === 'GROCERIES') return 'grocery'
+    if (primary === 'TRAVEL' || primary === 'TRANSPORTATION') return 'travel'
+    if (detailed.includes('ONLINE_MARKETPLACE') || detailed.includes('DIGITAL_PURCHASE')) return 'online'
+    return 'store'
+  }
+
+  // Legacy fallback: iterate most-specific to most-general
+  const legacyMap: Record<string, string> = {
+    'Food and Drink': 'food', 'Restaurants': 'food', 'Coffee Shop': 'food',
+    'Fast Food': 'food', 'Bakeries': 'food', 'Delis': 'food', 'Food Courts': 'food',
+    'Bar': 'food', 'Breweries': 'food', 'Catering': 'food',
+    'Supermarkets and Groceries': 'grocery', 'Warehouse Clubs': 'grocery',
+    'Gas Stations': 'gas',
+    'Airlines and Aviation Services': 'travel', 'Hotels': 'travel',
+    'Car Rental': 'travel', 'Travel': 'travel',
+    'Digital Purchase': 'online', 'Internet Services': 'online',
+    'Shops': 'store', 'Department Stores': 'store',
+  }
+  for (const cat of [...(t.category ?? [])].reverse()) {
+    if (legacyMap[cat]) return legacyMap[cat]
   }
   return 'store'
 }
@@ -81,7 +76,14 @@ Deno.serve(async (req) => {
     .eq('item_id', card.plaid_item_id)
     .single()
 
-  let cursor = connection?.cursor ?? null
+  if (!connection) {
+    return new Response(JSON.stringify({ error: `No Plaid connection found for item_id: ${card.plaid_item_id}` }), {
+      status: 400,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    })
+  }
+
+  let cursor = connection.cursor ?? null
   let added: any[] = []
   let modified: any[] = []
   let removed: any[] = []
@@ -96,12 +98,14 @@ Deno.serve(async (req) => {
         secret: PLAID_SECRET,
         access_token: connection!.access_token,
         cursor,
+        options: { include_personal_finance_category: true },
       }),
     })
 
     const syncData = await syncRes.json()
     if (syncData.error_code) {
-      return new Response(JSON.stringify({ error: `Plaid sync error: ${syncData.error_message}` }), {
+      console.error('[plaid-sync-transactions] Plaid error:', JSON.stringify(syncData))
+      return new Response(JSON.stringify({ error: `${syncData.error_code}: ${syncData.error_message}` }), {
         status: 400,
         headers: { ...corsHeaders, 'Content-Type': 'application/json' },
       })
@@ -127,12 +131,12 @@ Deno.serve(async (req) => {
       card_id,
       amount: Math.abs(t.amount),
       merchant: t.merchant_name ?? t.name,
-      category: mapCategory(t.category ?? []),
+      category: mapCategory(t),
       date: t.date,
     }))
 
   if (toUpsert.length > 0) {
-    await supabase.from('purchases').upsert(toUpsert)
+    await supabase.from('purchases').upsert(toUpsert, { onConflict: 'id' })
   }
 
   // Delete removed transactions

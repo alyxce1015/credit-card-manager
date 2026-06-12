@@ -217,6 +217,11 @@ export async function plaidGetLinkToken(): Promise<string> {
   return data.link_token;
 }
 
+export async function plaidGetUpdateLinkToken(cardId: string): Promise<string> {
+  const data = await callEdge('plaid-link-token', { card_id: cardId }) as { link_token: string };
+  return data.link_token;
+}
+
 export async function plaidExchangeToken(opts: {
   publicToken: string;
   institutionName: string;

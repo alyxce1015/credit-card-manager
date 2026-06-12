@@ -12,7 +12,7 @@ import { modalStyles } from './styles/modal';
 import { dashStyles as ds } from './styles/dashboard';
 import { FontAwesome6 } from '@expo/vector-icons';
 import { CARD_CATALOG, ISSUERS, type CatalogCard, type Benefit } from './data/cards';
-import { getCards, insertCard, deleteCard, deleteCards, updateCard, setCardPaidDate, getPurchases, insertPurchase, clearAllData, plaidGetLinkToken, plaidExchangeToken, plaidSyncLiabilities, plaidSyncTransactions, type UserCard, type Purchase } from './db/database';
+import { getCards, insertCard, deleteCard, deleteCards, updateCard, setCardPaidDate, getPurchases, insertPurchase, clearAllData, plaidGetLinkToken, plaidGetUpdateLinkToken, plaidExchangeToken, plaidSyncLiabilities, plaidSyncTransactions, type UserCard, type Purchase } from './db/database';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -880,9 +880,54 @@ export default function App() {
       setCards(newCards);
       setPurchases(newPurchases);
     } catch (e) {
-      Alert.alert('Sync failed', e instanceof Error ? e.message : 'Could not sync data');
+      const msg = e instanceof Error ? e.message : '';
+      if (msg.startsWith('ITEM_LOGIN_REQUIRED')) {
+        const reconnect = window.confirm(`Your ${card.name} bank connection has expired. Reconnect now?`);
+        if (reconnect) handleReconnectBank(card);
+      } else {
+        Alert.alert('Sync failed', msg || 'Could not sync data');
+      }
     } finally {
       setSyncingCardId(null);
+    }
+  }
+
+  async function handleReconnectBank(card: UserCard) {
+    setConnectingCardId(card.id);
+    try {
+      const token = await plaidGetUpdateLinkToken(card.id);
+      await new Promise<void>((resolve, reject) => {
+        if ((window as any).Plaid) { resolve(); return; }
+        const SCRIPT_ID = 'plaid-link-script';
+        let script = document.getElementById(SCRIPT_ID) as HTMLScriptElement | null;
+        if (!script) {
+          script = document.createElement('script');
+          script.id = SCRIPT_ID;
+          script.src = 'https://cdn.plaid.com/link/v2/stable/link-initialize.js';
+          document.head.appendChild(script);
+        }
+        script.addEventListener('load', () => resolve());
+        script.addEventListener('error', () => reject(new Error('Failed to load Plaid')));
+      });
+      (window as any).Plaid.create({
+        token,
+        onSuccess: async () => {
+          try {
+            await Promise.all([plaidSyncLiabilities(card.id), plaidSyncTransactions(card.id)]);
+            const [newCards, newPurchases] = await Promise.all([getCards(), getPurchases()]);
+            setCards(newCards);
+            setPurchases(newPurchases);
+          } catch (e) {
+            Alert.alert('Sync failed', e instanceof Error ? e.message : 'Could not sync after reconnect');
+          } finally {
+            setConnectingCardId(null);
+          }
+        },
+        onExit: () => { setConnectingCardId(null); },
+      }).open();
+    } catch (e) {
+      setConnectingCardId(null);
+      Alert.alert('Error', e instanceof Error ? e.message : 'Could not reconnect');
     }
   }
 

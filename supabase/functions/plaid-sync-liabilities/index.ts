@@ -68,7 +68,16 @@ Deno.serve(async (req) => {
 
   const liabData = await liabRes.json()
   if (liabData.error_code) {
-    return new Response(JSON.stringify({ error: `Plaid liabilities error: ${liabData.error_message}` }), {
+    console.error('[plaid-sync-liabilities] Plaid error:', JSON.stringify(liabData))
+    return new Response(JSON.stringify({ error: `${liabData.error_code}: ${liabData.error_message}` }), {
+      status: 400,
+      headers: { ...corsHeaders, 'Content-Type': 'application/json' },
+    })
+  }
+
+  if (balanceData.error_code) {
+    console.error('[plaid-sync-liabilities] Balance error:', JSON.stringify(balanceData))
+    return new Response(JSON.stringify({ error: `${balanceData.error_code}: ${balanceData.error_message}` }), {
       status: 400,
       headers: { ...corsHeaders, 'Content-Type': 'application/json' },
     })
