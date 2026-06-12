@@ -3,7 +3,7 @@ import { useFonts } from 'expo-font';
 import { StatusBar } from 'expo-status-bar';
 import {
   Text, View, ScrollView, Pressable, TouchableOpacity,
-  Modal, TextInput, KeyboardAvoidingView, Platform, Image,
+  Modal, TextInput, KeyboardAvoidingView, Image,
   useWindowDimensions, Animated, Linking, Alert,
 } from 'react-native';
 import { layoutStyles } from './styles/layout';
@@ -13,18 +13,6 @@ import { dashStyles as ds } from './styles/dashboard';
 import { FontAwesome6 } from '@expo/vector-icons';
 import { CARD_CATALOG, ISSUERS, type CatalogCard, type Benefit } from './data/cards';
 import { getCards, insertCard, deleteCard, deleteCards, updateCard, setCardPaidDate, getPurchases, insertPurchase, clearAllData, plaidGetLinkToken, plaidExchangeToken, plaidSyncLiabilities, plaidSyncTransactions, type UserCard, type Purchase } from './db/database';
-
-// ─── Plaid SDK (native only) ──────────────────────────────────────────────────
-
-let _plaidCreate: ((config: { token: string }) => void) | null = null;
-let _plaidOpen: ((props: { onSuccess: (s: any) => void; onExit: (e: any) => void }) => void) | null = null;
-if (Platform.OS !== 'web') {
-  try {
-    const sdk = require('react-native-plaid-link-sdk');
-    _plaidCreate = sdk.create;
-    _plaidOpen = sdk.open;
-  } catch {}
-}
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -197,6 +185,7 @@ function currentDueDate(dueDay: number): string {
 }
 
 function isCardPaid(card: UserCard): boolean {
+  if (card.minimumPayment !== undefined) return card.minimumPayment === 0;
   if (!card.paidDate) return false;
   const dueDate = card.nextPaymentDue ?? (card.dueDay ? currentDueDate(card.dueDay) : null);
   return !!dueDate && card.paidDate === dueDate;
@@ -462,12 +451,38 @@ export default function App() {
   const stepAnim = useRef(new Animated.Value(1)).current;
 
   useEffect(() => {
-    getCards()
-      .then(setCards)
-      .catch((e) => setSaveError('Could not load cards: ' + (e instanceof Error ? e.message : String(e))));
-    getPurchases()
-      .then(setPurchases)
-      .catch(() => {}); // non-fatal — table may not exist yet
+    async function init() {
+      const loadedCards = await getCards();
+      setCards(loadedCards);
+      setPurchases(await getPurchases());
+      const connected = loadedCards.filter(c => c.plaidItemId);
+      if (connected.length === 0) return;
+      await Promise.all(connected.map(c =>
+        Promise.all([plaidSyncLiabilities(c.id), plaidSyncTransactions(c.id)]).catch(() => {})
+      ));
+      const [newCards, newPurchases] = await Promise.all([getCards(), getPurchases()]);
+      setCards(newCards);
+      setPurchases(newPurchases);
+    }
+    init().catch((e) => setSaveError('Could not load cards: ' + (e instanceof Error ? e.message : String(e))));
+  }, []);
+
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    async function onVisible() {
+      if (document.visibilityState !== 'visible') return;
+      const currentCards = await getCards().catch(() => [] as UserCard[]);
+      const connected = currentCards.filter(c => c.plaidItemId);
+      if (connected.length === 0) return;
+      await Promise.all(connected.map(c =>
+        Promise.all([plaidSyncLiabilities(c.id), plaidSyncTransactions(c.id)]).catch(() => {})
+      ));
+      const [newCards, newPurchases] = await Promise.all([getCards(), getPurchases()]);
+      setCards(newCards);
+      setPurchases(newPurchases);
+    }
+    document.addEventListener('visibilitychange', onVisible);
+    return () => document.removeEventListener('visibilitychange', onVisible);
   }, []);
 
   useEffect(() => {
@@ -832,33 +847,24 @@ export default function App() {
         if (err?.displayMessage) Alert.alert('Link error', err.displayMessage);
       };
 
-      if (Platform.OS === 'web') {
-        await new Promise<void>((resolve, reject) => {
-          if ((window as any).Plaid) { resolve(); return; }
-          const SCRIPT_ID = 'plaid-link-script';
-          let script = document.getElementById(SCRIPT_ID) as HTMLScriptElement | null;
-          if (!script) {
-            script = document.createElement('script');
-            script.id = SCRIPT_ID;
-            script.src = 'https://cdn.plaid.com/link/v2/stable/link-initialize.js';
-            document.head.appendChild(script);
-          }
-          script.addEventListener('load', () => resolve());
-          script.addEventListener('error', () => reject(new Error('Failed to load Plaid')));
-        });
-        (window as any).Plaid.create({
-          token,
-          onSuccess: (public_token: string, metadata: any) => onSuccess(public_token, metadata),
-          onExit: (err: any) => onExit(err?.error ?? err),
-        }).open();
-      } else {
-        if (!_plaidCreate || !_plaidOpen) { setConnectingCardId(null); return; }
-        _plaidCreate({ token });
-        _plaidOpen({
-          onSuccess: (success: any) => onSuccess(success.publicToken, success.metadata),
-          onExit: (exit: any) => onExit(exit?.error),
-        });
-      }
+      await new Promise<void>((resolve, reject) => {
+        if ((window as any).Plaid) { resolve(); return; }
+        const SCRIPT_ID = 'plaid-link-script';
+        let script = document.getElementById(SCRIPT_ID) as HTMLScriptElement | null;
+        if (!script) {
+          script = document.createElement('script');
+          script.id = SCRIPT_ID;
+          script.src = 'https://cdn.plaid.com/link/v2/stable/link-initialize.js';
+          document.head.appendChild(script);
+        }
+        script.addEventListener('load', () => resolve());
+        script.addEventListener('error', () => reject(new Error('Failed to load Plaid')));
+      });
+      (window as any).Plaid.create({
+        token,
+        onSuccess: (public_token: string, metadata: any) => onSuccess(public_token, metadata),
+        onExit: (err: any) => onExit(err?.error ?? err),
+      }).open();
     } catch (e) {
       setConnectingCardId(null);
       console.error('[Plaid Connect]', e);
@@ -885,66 +891,38 @@ export default function App() {
     try {
       const token = await plaidGetLinkToken();
 
-      if (Platform.OS === 'web') {
-        await new Promise<void>((resolve, reject) => {
-          if ((window as any).Plaid) { resolve(); return; }
-          const SCRIPT_ID = 'plaid-link-script';
-          let script = document.getElementById(SCRIPT_ID) as HTMLScriptElement | null;
-          if (!script) {
-            script = document.createElement('script');
-            script.id = SCRIPT_ID;
-            script.src = 'https://cdn.plaid.com/link/v2/stable/link-initialize.js';
-            document.head.appendChild(script);
-          }
-          script.addEventListener('load', () => resolve());
-          script.addEventListener('error', () => reject(new Error('Failed to load Plaid script')));
-        });
-
-        (window as any).Plaid.create({
-          token,
-          onSuccess: async (public_token: string, metadata: any) => {
-            try {
-              await plaidExchangeToken({
-                publicToken: public_token,
-                institutionName: metadata?.institution?.name ?? '',
-                institutionId: metadata?.institution?.institution_id ?? '',
-              });
-              Alert.alert('Bank connected!', `${metadata?.institution?.name ?? 'Your bank'} has been linked successfully.`);
-            } catch (e) {
-              Alert.alert('Error', e instanceof Error ? e.message : 'Could not link account');
-            } finally {
-              setConnectingBank(false);
-            }
-          },
-          onExit: () => { setConnectingBank(false); },
-        }).open();
-      } else {
-        if (_plaidCreate && _plaidOpen) {
-          _plaidCreate({ token });
-          _plaidOpen({
-            onSuccess: async (success: any) => {
-              try {
-                await plaidExchangeToken({
-                  publicToken: success.publicToken,
-                  institutionName: success.metadata?.institution?.name ?? '',
-                  institutionId: success.metadata?.institution?.institution_id ?? '',
-                });
-                Alert.alert('Bank connected!', `${success.metadata?.institution?.name ?? 'Your bank'} has been linked.`);
-              } catch (e) {
-                Alert.alert('Error', e instanceof Error ? e.message : 'Could not link account');
-              } finally {
-                setConnectingBank(false);
-              }
-            },
-            onExit: (exit: any) => {
-              setConnectingBank(false);
-              if (exit?.error?.displayMessage) Alert.alert('Link error', exit.error.displayMessage);
-            },
-          });
-        } else {
-          setConnectingBank(false);
+      await new Promise<void>((resolve, reject) => {
+        if ((window as any).Plaid) { resolve(); return; }
+        const SCRIPT_ID = 'plaid-link-script';
+        let script = document.getElementById(SCRIPT_ID) as HTMLScriptElement | null;
+        if (!script) {
+          script = document.createElement('script');
+          script.id = SCRIPT_ID;
+          script.src = 'https://cdn.plaid.com/link/v2/stable/link-initialize.js';
+          document.head.appendChild(script);
         }
-      }
+        script.addEventListener('load', () => resolve());
+        script.addEventListener('error', () => reject(new Error('Failed to load Plaid script')));
+      });
+
+      (window as any).Plaid.create({
+        token,
+        onSuccess: async (public_token: string, metadata: any) => {
+          try {
+            await plaidExchangeToken({
+              publicToken: public_token,
+              institutionName: metadata?.institution?.name ?? '',
+              institutionId: metadata?.institution?.institution_id ?? '',
+            });
+            Alert.alert('Bank connected!', `${metadata?.institution?.name ?? 'Your bank'} has been linked successfully.`);
+          } catch (e) {
+            Alert.alert('Error', e instanceof Error ? e.message : 'Could not link account');
+          } finally {
+            setConnectingBank(false);
+          }
+        },
+        onExit: () => { setConnectingBank(false); },
+      }).open();
     } catch (e) {
       setConnectingBank(false);
       Alert.alert('Error', e instanceof Error ? e.message : 'Could not start bank connection');
@@ -953,14 +931,7 @@ export default function App() {
 
   async function handleClearAllData() {
     const message = 'This will permanently delete all your cards and purchases. This cannot be undone.';
-    const confirmed = Platform.OS === 'web'
-      ? window.confirm(message)
-      : await new Promise<boolean>(resolve =>
-          Alert.alert('Clear All Data', message, [
-            { text: 'Cancel', style: 'cancel', onPress: () => resolve(false) },
-            { text: 'Clear Everything', style: 'destructive', onPress: () => resolve(true) },
-          ])
-        );
+    const confirmed = window.confirm(message);
     if (!confirmed) return;
     try {
       await clearAllData();
@@ -972,11 +943,7 @@ export default function App() {
       setSelectedIds(new Set());
       setActiveTab('home');
     } catch {
-      if (Platform.OS === 'web') {
-        window.alert('Something went wrong. Please try again.');
-      } else {
-        Alert.alert('Error', 'Something went wrong. Please try again.');
-      }
+      window.alert('Something went wrong. Please try again.');
     }
   }
 
@@ -1108,6 +1075,11 @@ export default function App() {
                       <Text style={ds.insightText}>{feeInsight}</Text>
                     </View>
                   )}
+                </View>
+              ) : cards.length > 0 ? (
+                <View style={ds.insightPill}>
+                  <FontAwesome6 name="check" size={11} color="#7A9E7E" iconStyle="solid" />
+                  <Text style={ds.insightText}>All cards paid · nothing due soon</Text>
                 </View>
               ) : (
                 <View style={ds.insightPill}>
@@ -1300,9 +1272,8 @@ export default function App() {
                             {'Limit: $' + parseFloat(card.limit).toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
                           </Text>
                         ) : null}
-                        <Pressable
-                          onPress={() => handleTogglePaid(card)}
-                          style={({ pressed }) => ({
+                        {card.minimumPayment !== undefined ? (
+                          <View style={{
                             alignSelf: 'stretch' as const,
                             flexDirection: 'row' as const,
                             alignItems: 'center' as const,
@@ -1311,22 +1282,49 @@ export default function App() {
                             paddingVertical: 5,
                             borderRadius: 8,
                             marginTop: 2,
-                            backgroundColor: isCardPaid(card) ? 'rgba(122,158,126,0.15)' : 'rgba(192,138,91,0.1)',
+                            backgroundColor: card.minimumPayment === 0 ? 'rgba(122,158,126,0.15)' : 'rgba(192,138,91,0.1)',
                             borderWidth: 1,
-                            borderColor: isCardPaid(card) ? 'rgba(122,158,126,0.4)' : 'rgba(192,138,91,0.3)',
-                            opacity: pressed ? 0.7 : 1,
-                          })}
-                        >
-                          <FontAwesome6
-                            name={isCardPaid(card) ? 'check' : 'circle-check'}
-                            size={10}
-                            color={isCardPaid(card) ? '#7A9E7E' : '#C08A5B'}
-                            iconStyle="solid"
-                          />
-                          <Text style={{ fontSize: 10, fontWeight: '600', color: isCardPaid(card) ? '#7A9E7E' : '#C08A5B' }}>
-                            {isCardPaid(card) ? 'Paid' : 'Mark Paid'}
-                          </Text>
-                        </Pressable>
+                            borderColor: card.minimumPayment === 0 ? 'rgba(122,158,126,0.4)' : 'rgba(192,138,91,0.3)',
+                          }}>
+                            <FontAwesome6
+                              name={card.minimumPayment === 0 ? 'check' : 'circle-exclamation'}
+                              size={10}
+                              color={card.minimumPayment === 0 ? '#7A9E7E' : '#C08A5B'}
+                              iconStyle="solid"
+                            />
+                            <Text style={{ fontSize: 10, fontWeight: '600', color: card.minimumPayment === 0 ? '#7A9E7E' : '#C08A5B' }}>
+                              {card.minimumPayment === 0 ? 'Paid' : `Min Due: $${card.minimumPayment.toLocaleString('en-US', { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`}
+                            </Text>
+                          </View>
+                        ) : (
+                          <Pressable
+                            onPress={() => handleTogglePaid(card)}
+                            style={({ pressed }) => ({
+                              alignSelf: 'stretch' as const,
+                              flexDirection: 'row' as const,
+                              alignItems: 'center' as const,
+                              justifyContent: 'center' as const,
+                              gap: 4,
+                              paddingVertical: 5,
+                              borderRadius: 8,
+                              marginTop: 2,
+                              backgroundColor: isCardPaid(card) ? 'rgba(122,158,126,0.15)' : 'rgba(192,138,91,0.1)',
+                              borderWidth: 1,
+                              borderColor: isCardPaid(card) ? 'rgba(122,158,126,0.4)' : 'rgba(192,138,91,0.3)',
+                              opacity: pressed ? 0.7 : 1,
+                            })}
+                          >
+                            <FontAwesome6
+                              name={isCardPaid(card) ? 'check' : 'circle-check'}
+                              size={10}
+                              color={isCardPaid(card) ? '#7A9E7E' : '#C08A5B'}
+                              iconStyle="solid"
+                            />
+                            <Text style={{ fontSize: 10, fontWeight: '600', color: isCardPaid(card) ? '#7A9E7E' : '#C08A5B' }}>
+                              {isCardPaid(card) ? 'Paid' : 'Mark Paid'}
+                            </Text>
+                          </Pressable>
+                        )}
 
                         {/* Plaid Connect button */}
                         {!card.plaidAccountId && (
@@ -1472,7 +1470,7 @@ export default function App() {
                                     <View style={{ backgroundColor: balBg, borderRadius: 6, paddingHorizontal: 7, paddingVertical: 2, flexDirection: 'row', alignItems: 'center', gap: 4, borderWidth: 1, borderColor: balBorder }}>
                                       {(balRed || balCaution) && <FontAwesome6 name="triangle-exclamation" size={10} color={balColor} iconStyle="solid" />}
                                       <Text style={{ fontSize: 10, color: balColor, fontWeight: '600' }}>
-                                        {`Bal: $${card.currentBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
+                                        {`Balance: $${card.currentBalance.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`}
                                       </Text>
                                     </View>
                                   </View>
@@ -2058,7 +2056,7 @@ export default function App() {
               ) : (
                 <KeyboardAvoidingView
                   style={{ flex: 1 }}
-                  behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+                  behavior={undefined}
                 >
                   <View style={styles.modalHeader}>
                     <Pressable onPress={goBack} hitSlop={8}>
@@ -2195,7 +2193,7 @@ export default function App() {
       <Modal visible={purchaseModalVisible} animationType="slide" transparent>
         <KeyboardAvoidingView
           style={styles.modalOverlay}
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          behavior={undefined}
         >
           <View style={[styles.modalSheet, { maxHeight: windowHeight * 0.88 }]}>
             <View style={styles.dragHandle} />
@@ -2364,7 +2362,7 @@ export default function App() {
       <Modal visible={editModalVisible} animationType="slide" transparent>
         <KeyboardAvoidingView
           style={styles.modalOverlay}
-          behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+          behavior={undefined}
         >
           <View style={[styles.modalSheet, { maxHeight: windowHeight * 0.85 }]}>
             <View style={styles.dragHandle} />

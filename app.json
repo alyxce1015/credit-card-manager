@@ -6,25 +6,10 @@
     "orientation": "portrait",
     "icon": "./assets/icon.png",
     "userInterfaceStyle": "light",
-    "newArchEnabled": true,
-    "scheme": "creditcardmanager",
     "splash": {
       "image": "./assets/splash-icon.png",
       "resizeMode": "contain",
       "backgroundColor": "#ffffff"
-    },
-    "ios": {
-      "supportsTablet": true,
-      "bundleIdentifier": "com.xander.creditcardmanager"
-    },
-    "android": {
-      "package": "com.xander.creditcardmanager",
-      "adaptiveIcon": {
-        "foregroundImage": "./assets/adaptive-icon.png",
-        "backgroundColor": "#ffffff"
-      },
-      "edgeToEdgeEnabled": true,
-      "predictiveBackGestureEnabled": false
     },
     "web": {
       "favicon": "./assets/latte-art.png",
@@ -36,9 +21,6 @@
       "display": "standalone",
       "orientation": "portrait",
       "lang": "en"
-    },
-    "plugins": [
-      "expo-dev-client"
-    ]
+    }
   }
 }
