@@ -13,6 +13,7 @@ import { dashStyles as ds } from './styles/dashboard';
 import { FontAwesome6 } from '@expo/vector-icons';
 import { CARD_CATALOG, ISSUERS, type CatalogCard, type Benefit } from './data/cards';
 import { getCards, insertCard, deleteCard, deleteCards, updateCard, setCardPaidDate, getPurchases, insertPurchase, clearAllData, plaidGetLinkToken, plaidGetUpdateLinkToken, plaidExchangeToken, plaidSyncLiabilities, plaidSyncTransactions, type UserCard, type Purchase } from './db/database';
+import { supabase } from './lib/supabase';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
@@ -467,22 +468,48 @@ export default function App() {
     init().catch((e) => setSaveError('Could not load cards: ' + (e instanceof Error ? e.message : String(e))));
   }, []);
 
+  // Throttled visibility sync — only hits Plaid once every 30 min; Realtime handles UI refresh
   useEffect(() => {
     if (typeof document === 'undefined') return;
+    const SYNC_INTERVAL_MS = 30 * 60 * 1000;
     async function onVisible() {
       if (document.visibilityState !== 'visible') return;
-      const currentCards = await getCards().catch(() => [] as UserCard[]);
-      const connected = currentCards.filter(c => c.plaidItemId);
-      if (connected.length === 0) return;
-      await Promise.all(connected.map(c =>
-        Promise.all([plaidSyncLiabilities(c.id), plaidSyncTransactions(c.id)]).catch(() => {})
-      ));
-      const [newCards, newPurchases] = await Promise.all([getCards(), getPurchases()]);
-      setCards(newCards);
-      setPurchases(newPurchases);
+      try {
+        const lastSync = parseInt(window.localStorage.getItem('espressowe_last_sync') ?? '0');
+        if (Date.now() - lastSync < SYNC_INTERVAL_MS) return;
+        const currentCards = await getCards().catch(() => [] as UserCard[]);
+        const connected = currentCards.filter(c => c.plaidItemId);
+        if (connected.length === 0) return;
+        window.localStorage.setItem('espressowe_last_sync', String(Date.now()));
+        await Promise.all(connected.map(c =>
+          Promise.all([plaidSyncLiabilities(c.id), plaidSyncTransactions(c.id)]).catch(() => {})
+        ));
+      } catch {}
     }
     document.addEventListener('visibilitychange', onVisible);
     return () => document.removeEventListener('visibilitychange', onVisible);
+  }, []);
+
+  // Realtime — UI updates the moment the edge function writes to purchases or cards
+  useEffect(() => {
+    const purchasesSub = supabase
+      .channel('realtime-purchases')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'purchases' }, () => {
+        getPurchases().then(setPurchases).catch(() => {});
+      })
+      .subscribe();
+
+    const cardsSub = supabase
+      .channel('realtime-cards')
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'cards' }, () => {
+        getCards().then(setCards).catch(() => {});
+      })
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(purchasesSub);
+      supabase.removeChannel(cardsSub);
+    };
   }, []);
 
   useEffect(() => {
